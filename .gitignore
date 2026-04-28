@@ -1,0 +1,31 @@
+# Build output
+build/
+
+# ESP-IDF generated config (user-specific, regenerated from sdkconfig.defaults)
+sdkconfig
+sdkconfig.old
+
+# Managed components (downloaded by ESP-IDF component manager)
+managed_components/
+
+# Dependencies lock (regenerated from idf_component.yml)
+dependencies.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Captured MQTT traffic (contains sensitive device/network info)
+captured_mqtt*.json
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

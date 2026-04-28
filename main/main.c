@@ -1,0 +1,188 @@
+/*
+ * ESP32 MQTT Broker — Application Entry Point
+ *
+ * Initializes NVS, WiFi, LED status, captive portal, and starts the
+ * MQTT broker.
+ */
+
+#include "mqtt_broker.h"
+#include "wifi_connect.h"
+#include "portal.h"
+#include "led_strip.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+
+static const char *TAG = "main";
+
+/* ---- LED status patterns ---- */
+
+static led_strip_handle_t s_led = NULL;
+
+static void led_init(void)
+{
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = GPIO_NUM_21,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+        .flags.invert_out = false,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = false,
+    };
+    esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LED init failed: %d", err);
+        s_led = NULL;
+    }
+}
+
+static void led_set(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!s_led) return;
+    led_strip_set_pixel(s_led, 0, r, g, b);
+    led_strip_refresh(s_led);
+}
+
+static void led_off(void)
+{
+    if (!s_led) return;
+    led_strip_clear(s_led);
+}
+
+/* Blue fast blink — booting */
+static void led_boot_pattern(void)
+{
+    for (int i = 0; i < 6; i++) {
+        led_set(0, 0, 30);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        led_off();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+/* Yellow 2-blink — connecting WiFi */
+static void led_connecting_pattern(void)
+{
+    for (int i = 0; i < 2; i++) {
+        led_set(30, 20, 0);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        led_off();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+/* Red 3-blink — WiFi failed, AP mode */
+static void led_fail_pattern(void)
+{
+    for (int i = 0; i < 3; i++) {
+        led_set(30, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        led_off();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+/* LED status task — runs continuously after startup */
+typedef enum {
+    LED_STATE_BOOT,
+    LED_STATE_CONNECTING,
+    LED_STATE_FAILED_AP,
+    LED_STATE_CONNECTED,
+    LED_STATE_AP_ONLY,
+} led_state_t;
+
+static volatile led_state_t s_led_state = LED_STATE_BOOT;
+
+static void led_task(void *arg)
+{
+    while (1) {
+        switch (s_led_state) {
+            case LED_STATE_BOOT:
+                led_boot_pattern();
+                break;
+            case LED_STATE_CONNECTING:
+                led_connecting_pattern();
+                break;
+            case LED_STATE_FAILED_AP:
+                led_fail_pattern();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                break;
+            case LED_STATE_CONNECTED:
+                /* Green slow pulse */
+                led_set(0, 20, 0);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                led_off();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                break;
+            case LED_STATE_AP_ONLY:
+                /* Cyan slow pulse */
+                led_set(0, 15, 20);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                led_off();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+/* ---- Entry point ---- */
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "=== ESP32 MQTT Broker starting ===");
+
+    /* Initialize NVS (required for WiFi) */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition truncated, erasing...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    /* Initialize LED */
+    led_init();
+    s_led_state = LED_STATE_BOOT;
+
+    /* Start LED status task */
+    xTaskCreate(led_task, "led_task", 2048, NULL, 2, NULL);
+
+    /* Connect WiFi (blocks until connected or falls back to AP) */
+    s_led_state = LED_STATE_CONNECTING;
+    ESP_LOGI(TAG, "Connecting WiFi...");
+    int wifi_ok = wifi_connect_sta();
+
+    if (wifi_ok == 0 && wifi_get_sta_connected()) {
+        ESP_LOGI(TAG, "WiFi STA connected");
+        s_led_state = LED_STATE_CONNECTED;
+    } else {
+        ESP_LOGW(TAG, "WiFi STA not connected, running in AP mode");
+        s_led_state = LED_STATE_FAILED_AP;
+    }
+
+    /* Start captive portal (for WiFi config via web browser).
+     * Always enable AP so the portal is reachable at 192.168.4.1,
+     * even when STA is connected (AP+STA mode). */
+    ESP_LOGI(TAG, "Starting captive portal...");
+    if (wifi_get_sta_connected()) {
+        /* STA connected — switch to AP+STA so portal is reachable */
+        wifi_set_ap_mode(1);
+    }
+    portal_start();
+    if (!wifi_get_sta_connected()) {
+        s_led_state = LED_STATE_AP_ONLY;
+    }
+
+    /* Start MQTT broker */
+    ESP_LOGI(TAG, "Starting MQTT broker...");
+    broker_start();
+
+    ESP_LOGI(TAG, "=== ESP32 MQTT Broker ready ===");
+}
