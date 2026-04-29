@@ -10,6 +10,12 @@
 #include "portal.h"
 #include "led_strip.h"
 
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+#include "eth_connect.h"
+#include "esp_netif.h"
+#include "nvs.h"
+#endif
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -95,6 +101,7 @@ typedef enum {
     LED_STATE_FAILED_AP,
     LED_STATE_CONNECTED,
     LED_STATE_AP_ONLY,
+    LED_STATE_ETH_CONNECTED,  /* Ethernet + WiFi AP gateway mode */
 } led_state_t;
 
 static volatile led_state_t s_led_state = LED_STATE_BOOT;
@@ -123,6 +130,13 @@ static void led_task(void *arg)
             case LED_STATE_AP_ONLY:
                 /* Cyan slow pulse */
                 led_set(0, 15, 20);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                led_off();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                break;
+            case LED_STATE_ETH_CONNECTED:
+                /* White slow pulse — Ethernet gateway mode */
+                led_set(20, 20, 20);
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 led_off();
                 vTaskDelay(pdMS_TO_TICKS(1000));
@@ -168,7 +182,7 @@ void app_main(void)
     }
 
     /* Start captive portal (for WiFi config via web browser).
-     * Always enable AP so the portal is reachable at 192.168.4.1,
+     * Always enable AP so the portal is reachable at the AP IP,
      * even when STA is connected (AP+STA mode). */
     ESP_LOGI(TAG, "Starting captive portal...");
     if (wifi_get_sta_connected()) {
@@ -179,6 +193,36 @@ void app_main(void)
     if (!wifi_get_sta_connected()) {
         s_led_state = LED_STATE_AP_ONLY;
     }
+
+    /* Initialize Ethernet gateway if enabled at build time */
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+    ESP_LOGI(TAG, "Initializing Ethernet (W5500 SPI)...");
+    if (eth_init() == ESP_OK) {
+        /* Check NVS for saved NAPT state (default: enabled) */
+        uint8_t napt_en = 1;
+        {
+            nvs_handle_t h;
+            if (nvs_open("mqtt_cfg", NVS_READONLY, &h) == ESP_OK) {
+                nvs_get_u8(h, "napt_en", &napt_en);
+                nvs_close(h);
+            }
+        }
+
+        if (napt_en) {
+            eth_napt_enable();
+        } else {
+            ESP_LOGI(TAG, "NAPT disabled by saved config — WiFi AP isolated");
+        }
+
+        char eth_ip[16] = "";
+        eth_get_ip_str(eth_ip, sizeof(eth_ip));
+        ESP_LOGI(TAG, "Ethernet gateway ready — LAN IP: %s, NAPT: %s",
+                 eth_ip, napt_en ? "on" : "off");
+        s_led_state = LED_STATE_ETH_CONNECTED;
+    } else {
+        ESP_LOGW(TAG, "Ethernet init failed — continuing WiFi-only");
+    }
+#endif
 
     /* Start MQTT broker */
     ESP_LOGI(TAG, "Starting MQTT broker...");

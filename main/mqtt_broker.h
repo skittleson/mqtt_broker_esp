@@ -36,7 +36,7 @@
 /* ---- Captive Portal AP mode ---- */
 /* When enabled, the captive portal runs even if the device connects via
  * Ethernet (W5500 SPI). The portal provides WiFi configuration via
- * a web browser at the AP IP (192.168.4.1). */
+ * a web browser at the AP IP (default 192.168.25.1). */
 /* #define MQTT_BROKER_ENABLE_PORTAL  1 */
 
 /**

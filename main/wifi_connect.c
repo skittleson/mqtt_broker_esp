@@ -23,6 +23,7 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "lwip/ip4_addr.h"
 
 static const char *TAG = "wifi";
 
@@ -173,6 +174,66 @@ static int wifi_init_sta(const char *ssid, const char *password)
 
 #define NVS_SETTINGS_NS  "mqtt_cfg"
 
+/* Default AP IP from Kconfig (or fallback if not defined) */
+#ifndef CONFIG_MQTT_BROKER_AP_IP
+#define CONFIG_MQTT_BROKER_AP_IP      "192.168.25.1"
+#endif
+#ifndef CONFIG_MQTT_BROKER_AP_NETMASK
+#define CONFIG_MQTT_BROKER_AP_NETMASK "255.255.255.0"
+#endif
+
+static void load_ap_ip(char *ip_out, size_t ip_size, char *mask_out, size_t mask_size)
+{
+    /* Defaults from Kconfig */
+    strncpy(ip_out, CONFIG_MQTT_BROKER_AP_IP, ip_size - 1);
+    ip_out[ip_size - 1] = '\0';
+    strncpy(mask_out, CONFIG_MQTT_BROKER_AP_NETMASK, mask_size - 1);
+    mask_out[mask_size - 1] = '\0';
+
+    /* Override from NVS if saved */
+    nvs_handle_t h;
+    if (nvs_open(NVS_SETTINGS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = ip_size;
+        if (nvs_get_str(h, "ap_ip", ip_out, &len) == ESP_OK && len > 1) {
+            ESP_LOGI(TAG, "Loaded AP IP from NVS: '%s'", ip_out);
+        }
+        len = mask_size;
+        if (nvs_get_str(h, "ap_mask", mask_out, &len) == ESP_OK && len > 1) {
+            ESP_LOGI(TAG, "Loaded AP netmask from NVS: '%s'", mask_out);
+        }
+        nvs_close(h);
+    }
+}
+
+/*
+ * Apply custom AP IP/netmask to an AP netif.
+ * Must be called after netif creation but before or right after esp_wifi_start().
+ * Stops the DHCP server, sets IP, restarts DHCP server.
+ */
+static void apply_ap_ip(esp_netif_t *ap_netif)
+{
+    if (!ap_netif) return;
+
+    char ip_str[16], mask_str[16];
+    load_ap_ip(ip_str, sizeof(ip_str), mask_str, sizeof(mask_str));
+
+    esp_netif_ip_info_t ip_info;
+    memset(&ip_info, 0, sizeof(ip_info));
+    ip_info.ip.addr = ipaddr_addr(ip_str);
+    ip_info.gw.addr = ipaddr_addr(ip_str);   /* gateway = AP itself */
+    ip_info.netmask.addr = ipaddr_addr(mask_str);
+
+    /* Must stop DHCP server before changing IP */
+    esp_netif_dhcps_stop(ap_netif);
+    esp_err_t err = esp_netif_set_ip_info(ap_netif, &ip_info);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "AP IP set to %s (mask %s)", ip_str, mask_str);
+    } else {
+        ESP_LOGW(TAG, "Failed to set AP IP: %s", esp_err_to_name(err));
+    }
+    esp_netif_dhcps_start(ap_netif);
+}
+
 static void load_ap_config(char *ssid, size_t ssid_size, char *pass, size_t pass_size)
 {
     /* Defaults */
@@ -288,7 +349,8 @@ int wifi_connect_sta(void)
     s_wifi_mode = s_ap_enabled ? WIFI_MODE_APSTA : WIFI_MODE_AP;
 
     /* ESP32-S3 v0.2: must create AP netif BEFORE esp_wifi_set_mode */
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t *ap_nif = esp_netif_create_default_wifi_ap();
+    apply_ap_ip(ap_nif);
     esp_wifi_set_mode(s_wifi_mode);
     esp_wifi_start();
 
@@ -308,7 +370,8 @@ void wifi_start_ap(void)
 {
     esp_netif_init();
     esp_event_loop_create_default();
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t *ap_nif = esp_netif_create_default_wifi_ap();
+    apply_ap_ip(ap_nif);
 
     s_wifi_mode = WIFI_MODE_AP;
     esp_wifi_set_mode(WIFI_MODE_AP);
@@ -323,7 +386,8 @@ void wifi_start_apsta(void)
     esp_netif_init();
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t *ap_nif = esp_netif_create_default_wifi_ap();
+    apply_ap_ip(ap_nif);
 
     s_wifi_mode = WIFI_MODE_APSTA;
     esp_wifi_set_mode(WIFI_MODE_APSTA);
@@ -361,7 +425,8 @@ void wifi_set_ap_mode(int enabled)
         ESP_LOGI(TAG, "Enabling AP mode alongside STA");
 
         /* Create AP netif BEFORE changing mode (ESP32-S3 v0.2 requirement) */
-        esp_netif_create_default_wifi_ap();
+        esp_netif_t *ap_nif = esp_netif_create_default_wifi_ap();
+        apply_ap_ip(ap_nif);
 
         /* Load AP config from NVS */
         wifi_config_t ap_config;
@@ -469,4 +534,27 @@ int portal_get_sta_status(int *sta_connected, int *ap_running,
     if (ap_running) *ap_running = (s_wifi_mode == WIFI_MODE_AP || s_wifi_mode == WIFI_MODE_APSTA) ? 1 : 0;
 
     return 0;
+}
+
+void wifi_get_ap_ip_str(char *buf, size_t buf_size)
+{
+    if (!buf || buf_size == 0) return;
+
+    /* Try to read from the live AP netif first */
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(ap_netif, &ip) == ESP_OK && ip.ip.addr != 0) {
+            snprintf(buf, buf_size, "%lu.%lu.%lu.%lu",
+                     (unsigned long)(ip.ip.addr & 0xFF),
+                     (unsigned long)((ip.ip.addr >> 8) & 0xFF),
+                     (unsigned long)((ip.ip.addr >> 16) & 0xFF),
+                     (unsigned long)((ip.ip.addr >> 24) & 0xFF));
+            return;
+        }
+    }
+
+    /* Fallback: load from NVS or Kconfig default */
+    char mask[16];
+    load_ap_ip(buf, buf_size, mask, sizeof(mask));
 }

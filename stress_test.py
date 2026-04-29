@@ -12,7 +12,7 @@ import sys
 import statistics
 from collections import defaultdict
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.4.1"
+HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.25.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 1883
 
 # ── MQTT helpers ──────────────────────────────────────────────

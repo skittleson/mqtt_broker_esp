@@ -11,11 +11,12 @@
  *   - OTA firmware upload (file upload and URL fetch)
  *   - Reboot
  *
- * DNS server hijacks all queries to the AP IP (192.168.4.1).
+ * DNS server hijacks all queries to the AP IP (configurable, default 192.168.25.1).
  */
 
 #include "portal.h"
 #include "mqtt_broker.h"
+#include "wifi_connect.h"
 #include "version.h"
 
 #include <string.h>
@@ -43,11 +44,14 @@
 #include "esp_wifi.h"
 #include "nvs.h"
 
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+#include "eth_connect.h"
+#endif
+
 static const char *TAG = "portal";
 
 #define PORTAL_HTTP_PORT    80
 #define PORTAL_DNS_PORT     53
-#define PORTAL_AP_IP        "192.168.4.1"
 #define PORTAL_TASK_STACK   12288
 #define NVS_SETTINGS_NS     "mqtt_cfg"
 
@@ -864,10 +868,11 @@ static void handle_http_client(int client_fd)
 
         /* WiFi status banner */
         int sta_connected = 0, ap_running = 0;
-        char ip_str[16] = "192.168.4.1";
+        char ip_str[16] = "";
         char ssid_str[33] = "";
+        wifi_get_ap_ip_str(ip_str, sizeof(ip_str));  /* default to AP IP */
         portal_get_sta_status(&sta_connected, &ap_running, ip_str, sizeof(ip_str),
-                              ssid_str, sizeof(ssid_str));
+                               ssid_str, sizeof(ssid_str));
 
         if (sta_connected) {
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
@@ -876,6 +881,22 @@ static void handle_http_client(int client_fd)
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                 "<div class='st warn'>AP mode — connect to configure WiFi</div>");
         }
+
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+        {
+            char eth_ip[16] = "";
+            int eth_up = eth_is_connected();
+            if (eth_up) {
+                eth_get_ip_str(eth_ip, sizeof(eth_ip));
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<div class='st ok'>Ethernet — %s (%s)</div>",
+                    eth_ip, eth_napt_is_enabled() ? "NAPT on" : "NAPT off");
+            } else {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<div class='st warn'>Ethernet — disconnected</div>");
+            }
+        }
+#endif
 
         /* Broker quick stats */
         broker_stats_t stats;
@@ -913,8 +934,9 @@ static void handle_http_client(int client_fd)
 
         /* WiFi */
         int sta_connected = 0, ap_running = 0;
-        char ip_str[16] = "192.168.4.1";
+        char ip_str[16] = "";
         char ssid_str[33] = "";
+        wifi_get_ap_ip_str(ip_str, sizeof(ip_str));  /* default to AP IP */
         portal_get_sta_status(&sta_connected, &ap_running, ip_str, sizeof(ip_str),
                               ssid_str, sizeof(ssid_str));
 
@@ -932,6 +954,27 @@ static void handle_http_client(int client_fd)
                 "<tr><th>AP IP</th><td>%s</td></tr>", ip_str);
         }
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table></fieldset>");
+
+        /* Ethernet (only when compiled with W5500 support) */
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+        {
+            char eth_ip[16] = "";
+            int eth_up = eth_is_connected();
+            if (eth_up) eth_get_ip_str(eth_ip, sizeof(eth_ip));
+
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<fieldset><legend>&nbsp;Ethernet&nbsp;</legend><table>"
+                "<tr><th>Status</th><td>%s</td></tr>",
+                eth_up ? "Connected" : "Disconnected");
+            if (eth_up) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<tr><th>IP Address</th><td>%s</td></tr>"
+                    "<tr><th>NAPT</th><td>%s</td></tr>",
+                    eth_ip, eth_napt_is_enabled() ? "Enabled" : "Disabled");
+            }
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table></fieldset>");
+        }
+#endif
 
         /* Broker stats */
         broker_stats_t stats;
@@ -990,15 +1033,17 @@ static void handle_http_client(int client_fd)
         /* AP config */
         char ap_ssid[33] = "mqtt-broker";
         char ap_pass[65] = "mqtt1234";
+        char ap_ip_info[16] = "";
         nvs_settings_get_str("ap_ssid", ap_ssid, sizeof(ap_ssid), "mqtt-broker");
         nvs_settings_get_str("ap_pass", ap_pass, sizeof(ap_pass), "mqtt1234");
+        wifi_get_ap_ip_str(ap_ip_info, sizeof(ap_ip_info));
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Access Point&nbsp;</legend><table>"
             "<tr><th>AP SSID</th><td>%s</td></tr>"
             "<tr><th>AP Password</th><td>%s</td></tr>"
-            "<tr><th>AP IP</th><td>192.168.4.1</td></tr>"
+            "<tr><th>AP IP</th><td>%s</td></tr>"
             "</table></fieldset>",
-            ap_ssid, ap_pass);
+            ap_ssid, ap_pass, ap_ip_info);
 
         /* Device / firmware info */
         esp_chip_info_t chip;
@@ -1079,16 +1124,42 @@ static void handle_http_client(int client_fd)
             retain_en ? "checked" : "", retain_ttl_hours);
 
         /* AP settings in same form */
-        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-            "</fieldset>"
-            "<fieldset><legend>&nbsp;Access Point&nbsp;</legend>"
-            "<label>AP SSID</label>"
-            "<input type='text' name='ap_ssid' value='%s' placeholder='mqtt-broker' required maxlength='32'>"
-            "<label>AP Password (min 8 chars)</label>"
-            "<input type='password' name='ap_pass' value='%s' placeholder='mqtt1234' "
-            "minlength='8' maxlength='63' required "
-            "title='AP password must be 8-63 characters'>",
-            ap_ssid, ap_pass);
+        {
+            char ap_ip_val[16] = "";
+            wifi_get_ap_ip_str(ap_ip_val, sizeof(ap_ip_val));
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "</fieldset>"
+                "<fieldset><legend>&nbsp;Access Point&nbsp;</legend>"
+                "<label>AP SSID</label>"
+                "<input type='text' name='ap_ssid' value='%s' placeholder='mqtt-broker' required maxlength='32'>"
+                "<label>AP Password (min 8 chars)</label>"
+                "<input type='password' name='ap_pass' value='%s' placeholder='mqtt1234' "
+                "minlength='8' maxlength='63' required "
+                "title='AP password must be 8-63 characters'>"
+                "<label>AP IP Address (requires reboot)</label>"
+                "<input type='text' name='ap_ip' value='%s' "
+                "pattern='[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' "
+                "title='IPv4 address like 192.168.25.1'>",
+                ap_ssid, ap_pass, ap_ip_val);
+        }
+
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+        /* NAPT setting — only when Ethernet support is compiled in */
+        {
+            uint8_t napt_en = nvs_settings_get_u8("napt_en", 1);
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "</fieldset>"
+                "<fieldset><legend>&nbsp;Ethernet Gateway&nbsp;</legend>"
+                "<p><label style='font-weight:normal'>"
+                "<input type='checkbox' name='napt_en' value='1' %s> "
+                "Enable NAPT (LAN access to WiFi AP devices)</label></p>"
+                "<p style='color:#888;font-size:0.85em'>"
+                "When enabled, devices on the Ethernet LAN can reach WiFi AP clients "
+                "(e.g., Tasmota web UIs on the AP subnet). Disable for full network isolation. "
+                "Takes effect immediately.</p>",
+                napt_en ? "checked" : "");
+        }
+#endif
 
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "</fieldset>"
@@ -1138,6 +1209,17 @@ static void handle_http_client(int client_fd)
                 ESP_LOGW(TAG, "AP password rejected: too short (%d chars)", (int)strlen(val));
             }
         }
+        if (urldecode_param(req.body, "ap_ip", val, sizeof(val))) {
+            /* Basic validation: must have 4 octets */
+            unsigned int a, b, c, d;
+            if (sscanf(val, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+                a <= 255 && b <= 255 && c <= 255 && d <= 255) {
+                nvs_settings_set_str("ap_ip", val);
+                ESP_LOGI(TAG, "Saved AP IP: '%s' (reboot required)", val);
+            } else {
+                ESP_LOGW(TAG, "AP IP rejected: invalid format '%s'", val);
+            }
+        }
 
         /* Retain settings — checkbox absent means unchecked (disabled) */
         {
@@ -1153,6 +1235,25 @@ static void handle_http_client(int client_fd)
                 ESP_LOGI(TAG, "Saved retain TTL: %d hours (%ld sec)", hours, (long)ttl_sec);
             }
         }
+
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+        /* NAPT toggle — checkbox absent means unchecked (disabled).
+         * Apply immediately without reboot. */
+        {
+            uint8_t napt_en = (strstr(req.body, "napt_en=1") != NULL) ? 1 : 0;
+            uint8_t napt_was = nvs_settings_get_u8("napt_en", 1);
+            nvs_settings_set_u8("napt_en", napt_en);
+
+            if (napt_en != napt_was && eth_is_connected()) {
+                if (napt_en) {
+                    eth_napt_enable();
+                } else {
+                    eth_napt_disable();
+                }
+            }
+            ESP_LOGI(TAG, "Saved NAPT enabled: %d", napt_en);
+        }
+#endif
 
         http_send_redirect(client_fd, "/settings");
 
@@ -1485,7 +1586,7 @@ static void handle_http_client(int client_fd)
             "\"retained\":%lu,\"retained_kb\":%lu,\"port\":%d},"
             "\"firmware\":{\"name\":\"" FW_NAME "\",\"version\":\"" FW_VERSION "\","
             "\"build\":\"" __DATE__ " " __TIME__ "\"},"
-            "\"system\":{\"uptime_s\":%lld,\"free_heap_kb\":%lu}}",
+            "\"system\":{\"uptime_s\":%lld,\"free_heap_kb\":%lu}",
             sta_connected ? "true" : "false", ssid_str, ip_str,
             ap_running ? "true" : "false",
             stats.connected_clients, BROKER_MAX_CLIENTS,
@@ -1494,6 +1595,19 @@ static void handle_http_client(int client_fd)
             BROKER_PORT,
             (long long)(stats.uptime_ms / 1000),
             (unsigned long)(stats.free_heap / 1024));
+
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+        {
+            char eth_ip[16] = "";
+            int eth_up = eth_is_connected();
+            if (eth_up) eth_get_ip_str(eth_ip, sizeof(eth_ip));
+            len += snprintf(json + len, PAGE_BUF_SIZE - len,
+                ",\"ethernet\":{\"connected\":%s,\"ip\":\"%s\",\"napt\":%s}",
+                eth_up ? "true" : "false", eth_ip,
+                eth_napt_is_enabled() ? "true" : "false");
+        }
+#endif
+        len += snprintf(json + len, PAGE_BUF_SIZE - len, "}");
 
         http_response_start(client_fd, "200 OK", "application/json", len);
         http_send_body(client_fd, json, len);
@@ -1584,6 +1698,19 @@ static void portal_dns_task(void *arg)
 {
     static uint8_t dns_resp[64];
 
+    /* Get the current AP IP for DNS responses */
+    char ap_ip_str[16] = "";
+    wifi_get_ap_ip_str(ap_ip_str, sizeof(ap_ip_str));
+    uint32_t ap_ip_addr = 0;
+    {
+        /* Parse IP octets from string */
+        unsigned int a, b, c, d;
+        if (sscanf(ap_ip_str, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            ap_ip_addr = ((uint32_t)a << 24) | ((uint32_t)b << 16) |
+                         ((uint32_t)c << 8) | (uint32_t)d;
+        }
+    }
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(PORTAL_DNS_PORT),
@@ -1630,8 +1757,10 @@ static void portal_dns_task(void *arg)
         dns_resp[pos++] = 0;    dns_resp[pos++] = 1;
         dns_resp[pos++] = 0;    dns_resp[pos++] = 0;
         dns_resp[pos++] = 0;    dns_resp[pos++] = 4;
-        dns_resp[pos++] = 192;  dns_resp[pos++] = 168;
-        dns_resp[pos++] = 4;    dns_resp[pos++] = 1;
+        dns_resp[pos++] = (ap_ip_addr >> 24) & 0xFF;
+        dns_resp[pos++] = (ap_ip_addr >> 16) & 0xFF;
+        dns_resp[pos++] = (ap_ip_addr >> 8) & 0xFF;
+        dns_resp[pos++] = ap_ip_addr & 0xFF;
 
         sendto(s_dns_fd, dns_resp, (size_t)pos, 0,
             (struct sockaddr *)&client_addr, addr_len);
@@ -1645,7 +1774,9 @@ void portal_start(void)
     xTaskCreate(portal_http_task, "portal_http", PORTAL_TASK_STACK, NULL, 5, NULL);
     xTaskCreate(portal_dns_task, "portal_dns", PORTAL_TASK_STACK, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "Captive portal started — AP IP: %s", PORTAL_AP_IP);
+    char ap_ip[16] = "";
+    wifi_get_ap_ip_str(ap_ip, sizeof(ap_ip));
+    ESP_LOGI(TAG, "Captive portal started — AP IP: %s", ap_ip);
 }
 
 void portal_stop(void)

@@ -11,10 +11,11 @@
 #define WIFI_CONNECT_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* Default WiFi credentials — used as fallback if no NVS credentials.
  * Leave empty to boot into AP mode on first use (recommended).
- * Users configure WiFi via the captive portal at 192.168.4.1. */
+ * Users configure WiFi via the captive portal at the AP IP (default 192.168.25.1). */
 #define WIFI_SSID_DEFAULT       ""
 #define WIFI_PASSWORD_DEFAULT   ""
 
@@ -71,5 +72,14 @@ void wifi_set_ap_mode(int enabled);
  * @return 1 if AP enabled, 0 if disabled
  */
 int wifi_get_ap_mode(void);
+
+/**
+ * Get the current WiFi AP IP address as a string.
+ * Reads from NVS (key "ap_ip"), falls back to compile-time default.
+ *
+ * @param buf       Output buffer (at least 16 bytes)
+ * @param buf_size  Size of buf
+ */
+void wifi_get_ap_ip_str(char *buf, size_t buf_size);
 
 #endif /* WIFI_CONNECT_H */

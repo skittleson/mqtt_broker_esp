@@ -1,0 +1,84 @@
+menu "MQTT Broker Configuration"
+
+    config MQTT_BROKER_AP_IP
+        string "WiFi AP IP address"
+        default "192.168.25.1"
+        help
+            IP address of the ESP32 on the WiFi AP subnet.
+            This is the gateway/portal address for connected devices.
+            Can be overridden at runtime via the web portal (saved to NVS).
+
+    config MQTT_BROKER_AP_NETMASK
+        string "WiFi AP netmask"
+        default "255.255.255.0"
+        help
+            Subnet mask for the WiFi AP network.
+
+    config MQTT_BROKER_ETHERNET
+        bool "Enable Ethernet (W5500 SPI)"
+        default n
+        help
+            Enable W5500 SPI Ethernet interface. When enabled, the ESP32
+            acts as a gateway between the Ethernet LAN and WiFi AP subnet.
+            NAPT bridges the two networks so LAN devices can reach WiFi AP
+            clients (e.g., Tasmota devices on the AP subnet).
+
+            Requires a W5500 module wired to the configured SPI pins.
+
+    if MQTT_BROKER_ETHERNET
+
+        config ETH_SPI_HOST
+            int "SPI host (2 = SPI2_HOST)"
+            default 2
+            range 1 3
+            help
+                SPI host peripheral. 2 = SPI2_HOST (default), 3 = SPI3_HOST.
+
+        config ETH_SPI_MOSI
+            int "W5500 MOSI GPIO"
+            default 11
+            help
+                GPIO pin connected to W5500 MOSI.
+
+        config ETH_SPI_MISO
+            int "W5500 MISO GPIO"
+            default 13
+            help
+                GPIO pin connected to W5500 MISO.
+
+        config ETH_SPI_SCLK
+            int "W5500 SCLK GPIO"
+            default 12
+            help
+                GPIO pin connected to W5500 SCLK.
+
+        config ETH_SPI_CS
+            int "W5500 CS GPIO"
+            default 10
+            help
+                GPIO pin connected to W5500 CS (chip select).
+
+        config ETH_SPI_INT
+            int "W5500 INT GPIO"
+            default 4
+            help
+                GPIO pin connected to W5500 INT (interrupt).
+
+        config ETH_SPI_RST
+            int "W5500 RST GPIO (-1 for none)"
+            default 5
+            range -1 48
+            help
+                GPIO pin connected to W5500 hardware reset.
+                Set to -1 if not wired.
+
+        config ETH_SPI_CLOCK_MHZ
+            int "SPI clock speed (MHz)"
+            default 33
+            range 1 40
+            help
+                SPI clock speed in MHz. W5500 supports up to 33 MHz.
+
+    endif # MQTT_BROKER_ETHERNET
+
+endmenu

@@ -51,6 +51,8 @@ Power the ESP32 from a USB battery pack and take your MQTT infrastructure anywhe
 
 Use the Waveshare ESP32-S3-ETH board to bridge IoT devices on an isolated 2.4 GHz WiFi network to your wired LAN. IoT devices connect to the ESP32's AP, the broker handles messaging, and the Ethernet port connects to your main network. This keeps IoT traffic off your primary WiFi and provides a hardware-level network boundary.
 
+With NAPT enabled, you can still reach every device from your main network — open Tasmota web UIs at `192.168.25.x`, push firmware updates, check sensor readings, or debug misbehaving devices — all from your desk. When you're done, disable NAPT from the portal and the devices go back to being fully isolated. MQTT traffic always flows through the broker regardless of NAPT state.
+
 ### Client Tracking and Monitoring
 
 Every connected MQTT client is visible in the web portal with its client ID, IP address, connection duration, subscription count, and keep-alive interval. WiFi AP clients show MAC addresses and signal strength. The `/api/clients` JSON endpoint makes it easy to build dashboards, alerting, or inventory systems that track which devices are online and what they're doing.
@@ -72,6 +74,7 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 | **OTA Updates** | Firmware upload via web UI (file upload) or HTTP URL fetch — dual OTA partitions |
 | **JSON API** | `GET /api/status` returns broker stats, WiFi status, firmware version, and system info |
 | **WiFi** | STA + AP mode, NVS credential persistence, automatic AP fallback |
+| **Ethernet** | Optional W5500 SPI Ethernet with NAPT bridging (compile-time flag) |
 | **Captive Portal** | DNS hijack + HTTP server for WiFi configuration on first boot |
 | **LED Status** | WS2812 on GPIO21 — blue (boot), yellow (connecting), green (running), red (failed) |
 | **Configuration** | All settings configurable via web UI, persisted to NVS flash |
@@ -123,7 +126,7 @@ idf.py monitor
 <p align="center"><em>WiFi configuration captive portal on first boot.</em></p>
 
 1. The device creates a WiFi access point: **`mqtt-broker`** (password: **`mqtt1234`**)
-2. Connect to it and open **http://192.168.4.1** in your browser
+2. Connect to it and open **http://192.168.25.1** in your browser
 3. Configure your WiFi credentials in the portal
 4. The device reboots, connects to your WiFi, and starts the MQTT broker
 5. Connect your MQTT clients to the device's IP on port **1883**
@@ -280,12 +283,14 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 | Retain TTL | 168 hours | 0–8,760 | 0 = never expire |
 | AP SSID | `mqtt-broker` | 1–32 chars | — |
 | AP Password | `mqtt1234` | 8–63 chars | WPA2-PSK |
+| AP IP Address | `192.168.25.1` | Valid IPv4 | Requires reboot; also configurable at compile time |
+| NAPT | Enabled | on/off | Ethernet builds only; toggles LAN ↔ AP routing immediately |
 
 ### Compile-Time Settings
 
 | Setting | Default | File |
 |---------|---------|------|
-| Firmware version | 1.0.0 | `version.h` |
+| Firmware version | 0.2.0 | `version.h` |
 | Max clients | 100 | `mqtt_broker.h` |
 | Max subscriptions | 2,048 | `mqtt_broker.h` |
 | MQTT port | 1883 | `mqtt_broker.h` |
@@ -293,6 +298,8 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 | Max retained msg size | 64 KB | `mqtt_broker.h` |
 | Retain memory cap | 80% PSRAM | `mqtt_broker.h` |
 | Default WiFi SSID | *(empty)* | `wifi_connect.h` |
+| AP IP Address | `192.168.25.1` | `Kconfig.projbuild` |
+| AP Netmask | `255.255.255.0` | `Kconfig.projbuild` |
 | LED GPIO | 21 | `main.c` |
 
 ## Architecture
@@ -359,6 +366,8 @@ main/
 ├── mqtt_parser.c     Packet parser/serializer, topic matching
 ├── portal.h          Captive portal API
 ├── portal.c          HTTP server, DNS hijack, settings UI, JSON API, OTA handlers
+├── eth_connect.h     Ethernet W5500 API (optional, compile-time flag)
+├── eth_connect.c     W5500 SPI init, DHCP, NAPT bridging
 ├── wifi_connect.h    WiFi API and defaults
 └── wifi_connect.c    WiFi STA/AP, NVS persistence, portal callbacks
 ```
@@ -420,6 +429,7 @@ Tests: 90 concurrent connections, 500-message throughput, wildcard routing, late
 | 3-blink | Red | WiFi failed, AP mode active |
 | Slow pulse | Green | WiFi connected, broker running |
 | Slow pulse | Cyan | AP-only mode, portal running |
+| Slow pulse | White | Ethernet gateway mode (W5500 connected + WiFi AP) |
 
 ## Network Modes
 
@@ -429,7 +439,76 @@ The device operates in one of these WiFi modes:
 |------|------|--------|--------|
 | **STA** | Connected to WiFi, AP disabled | `<WiFi IP>:1883` | `<WiFi IP>:80` |
 | **AP+STA** | Connected to WiFi, AP enabled (default) | `<WiFi IP>:1883` | Both IPs on `:80` |
-| **AP only** | No WiFi credentials or connection failed | `192.168.4.1:1883` | `192.168.4.1:80` |
+| **AP only** | No WiFi credentials or connection failed | `192.168.25.1:1883` | `192.168.25.1:80` |
+
+### Ethernet Gateway (W5500)
+
+When built with `CONFIG_MQTT_BROKER_ETHERNET=y`, the ESP32 acts as a gateway between a wired LAN and the WiFi AP subnet. This requires a W5500 SPI Ethernet module (e.g., Waveshare ESP32-S3-ETH).
+
+```
+[Your LAN / PC]                    [Tasmota Device A: 192.168.25.2]
+      |                                      |
+  [Ethernet / W5500]              [WiFi AP: 192.168.25.1/24]
+      |                                      |
+      +----------[ ESP32-S3 MQTT Broker ]----+
+                   NAPT bridges the two subnets
+```
+
+**Why this matters:**
+
+IoT devices on the WiFi AP subnet (`192.168.25.x`) are hardware-isolated from your main network — they can't reach your LAN and your LAN can't reach them. MQTT messages flow through the broker regardless, so normal pub/sub works fine without NAPT.
+
+But when you need to interact with the devices directly — open a Tasmota web UI to change a setting, push an OTA firmware update, check a sensor's HTTP endpoint, or debug a device that's not responding to MQTT — you need IP-level access from your LAN to `192.168.25.x`. That's what NAPT provides.
+
+**How NAPT works:**
+
+1. The ESP32 gets an IP on your LAN via DHCP on the Ethernet interface (e.g., `10.0.0.50`)
+2. WiFi AP runs on `192.168.25.0/24` as usual — Tasmota devices connect here
+3. NAPT (Network Address Port Translation) on the WiFi AP interface translates packets from Ethernet → AP
+4. From your PC, browse `http://192.168.25.2` and the ESP32 forwards the request with source NAT'd to `192.168.25.1` — the Tasmota device responds to the broker, which relays the response back to your PC
+
+**Practical examples from your LAN:**
+
+```bash
+# Open a Tasmota device's web UI in your browser
+open http://192.168.25.2
+
+# Push a Tasmota command via HTTP
+curl "http://192.168.25.2/cm?cmnd=Status%200"
+
+# OTA flash a Tasmota device from your build machine
+curl "http://192.168.25.3/u2" -F "file=@tasmota.bin"
+
+# Ping a device to check if it's alive
+ping 192.168.25.4
+```
+
+**NAPT toggle:**
+
+NAPT can be enabled or disabled at runtime from the web portal's Configuration page. This is useful for debugging — enable NAPT when you need to reach devices directly, disable it when you want full network isolation. The setting persists across reboots via NVS.
+
+**Building with Ethernet support:**
+
+```bash
+# Option 1: Uncomment the Ethernet lines in sdkconfig.defaults
+# Option 2: Use the overlay file
+cat sdkconfig.defaults sdkconfig.defaults.eth > sdkconfig.combined
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.combined" reconfigure
+idf.py build
+```
+
+**SPI Pin Configuration (via menuconfig):**
+
+| Signal | Default GPIO | Kconfig Key |
+|--------|-------------|-------------|
+| MOSI | 11 | `CONFIG_ETH_SPI_MOSI` |
+| MISO | 13 | `CONFIG_ETH_SPI_MISO` |
+| SCLK | 12 | `CONFIG_ETH_SPI_SCLK` |
+| CS | 10 | `CONFIG_ETH_SPI_CS` |
+| INT | 4 | `CONFIG_ETH_SPI_INT` |
+| RST | 5 | `CONFIG_ETH_SPI_RST` |
+
+Adjust via `idf.py menuconfig` > MQTT Broker Configuration.
 
 ## Project Structure
 
@@ -437,13 +516,15 @@ The device operates in one of these WiFi modes:
 mqtt_esp32/
 ├── main/
 │   ├── CMakeLists.txt          Component build config
+│   ├── Kconfig.projbuild       Custom menuconfig options (Ethernet, pins)
 │   ├── idf_component.yml       LED strip dependency
 │   ├── main.c                  Application entry point
 │   ├── version.h               Firmware version (semver)
 │   ├── mqtt_broker.h/c         MQTT broker core
 │   ├── mqtt_parser.h/c         MQTT protocol parser
 │   ├── portal.h/c              Web portal + JSON API + OTA handlers
-│   └── wifi_connect.h/c        WiFi + NVS management
+│   ├── wifi_connect.h/c        WiFi + NVS management
+│   └── eth_connect.h/c         Ethernet W5500 + NAPT (optional, compile-time)
 ├── managed_components/         ESP-IDF managed components
 │   └── espressif__led_strip/   WS2812 LED driver
 ├── partitions.csv              Custom OTA partition table (16MB flash)
