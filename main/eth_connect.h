@@ -9,6 +9,8 @@
 #ifndef ETH_CONNECT_H
 #define ETH_CONNECT_H
 
+#include "sdkconfig.h"
+
 #ifdef CONFIG_MQTT_BROKER_ETHERNET
 
 #include "esp_err.h"

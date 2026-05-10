@@ -59,37 +59,38 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 
 ## Features
 
-| Category | Details |
-|----------|---------|
-| **Protocol** | Full MQTT 3.1.1 — CONNECT, SUBSCRIBE, PUBLISH, UNSUBSCRIBE, PINGREQ, DISCONNECT |
-| **Clients** | 100 concurrent connections, pre-allocated in PSRAM |
-| **Subscriptions** | 2,048 total entries across all clients |
-| **Wildcards** | `+` (single-level), `#` (multi-level), `$`-topic protection |
-| **Retained Messages** | Configurable TTL (default 7 days), 64KB max per message, PSRAM-backed with FIFO eviction |
-| **Binary Payloads** | Up to 16KB per message (configurable buffer size) — supports images, protobuf, etc. |
-| **Authentication** | Optional username/password via MQTT CONNECT (CONNACK 0x04 on failure) |
-| **Web Portal** | Tasmota-style dark theme UI for all settings, live stats, and device info |
-| **Client Monitoring** | Live view of connected MQTT clients (ID, IP, uptime, subscriptions) and WiFi AP clients (MAC, RSSI) |
-| **Firmware Version** | Semver display (Tasmota-style) on dashboard, footer, and JSON API |
-| **OTA Updates** | Firmware upload via web UI (file upload) or HTTP URL fetch — dual OTA partitions |
-| **JSON API** | `GET /api/status` returns broker stats, WiFi status, firmware version, and system info |
-| **WiFi** | STA + AP mode, NVS credential persistence, automatic AP fallback |
-| **Ethernet** | Optional W5500 SPI Ethernet with NAPT bridging (compile-time flag) |
-| **Captive Portal** | DNS hijack + HTTP server for WiFi configuration on first boot |
-| **LED Status** | WS2812 on GPIO21 — blue (boot), yellow (connecting), green (running), red (failed) |
-| **Configuration** | All settings configurable via web UI, persisted to NVS flash |
+| Category              | Details                                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Protocol**          | Full MQTT 3.1.1 — CONNECT, SUBSCRIBE, PUBLISH, UNSUBSCRIBE, PINGREQ, DISCONNECT                          |
+| **Clients**           | 100 concurrent connections, pre-allocated in PSRAM                                                       |
+| **Subscriptions**     | 2,048 total entries across all clients                                                                   |
+| **Wildcards**         | `+` (single-level), `#` (multi-level), `$`-topic protection                                              |
+| **Retained Messages** | Configurable TTL (default 7 days), 64KB max per message, PSRAM-backed with FIFO eviction                 |
+| **Binary Payloads**   | Up to 16KB per message (configurable buffer size) — supports images, protobuf, etc.                      |
+| **Authentication**    | Optional username/password via MQTT CONNECT (CONNACK 0x04 on failure)                                    |
+| **Web Portal**        | Tasmota-style dark theme UI for all settings, live stats, and device info                                |
+| **Client Monitoring** | Live view of connected MQTT clients (ID, IP, uptime, subscriptions) and WiFi AP clients (MAC, RSSI)      |
+| **Firmware Version**  | Semver display (Tasmota-style) on dashboard, footer, and JSON API                                        |
+| **OTA Updates**       | Firmware upload via web UI (file upload) or HTTP URL fetch — dual OTA partitions                         |
+| **JSON API**          | `GET /api/status` returns broker stats, WiFi status, firmware version, and system info                   |
+| **WiFi**              | STA + AP mode, NVS credential persistence, automatic AP fallback                                         |
+| **Ethernet**          | Optional W5500 SPI Ethernet with NAPT bridging (compile-time flag)                                       |
+| **Captive Portal**    | DNS hijack + HTTP server for WiFi configuration on first boot                                            |
+| **mDNS / Bonjour**    | Configurable hostname; reachable as `<hostname>.local`, advertises `_mqtt._tcp:1883` and `_http._tcp:80` |
+| **LED Status**        | WS2812 on GPIO21 — blue (boot), yellow (connecting), green (running), red (failed)                       |
+| **Configuration**     | All settings configurable via web UI, persisted to NVS flash                                             |
 
 ## Hardware
 
-| Component | Spec |
-|-----------|------|
-| Board | [Waveshare ESP32-S3-ETH](https://www.waveshare.com/wiki/ESP32-S3-ETH) (or any ESP32-S3 with PSRAM) |
-| MCU | ESP32-S3 dual-core Xtensa LX7 @ 240 MHz |
-| PSRAM | 8 MB octal SPI |
-| Flash | 16 MB (dual 4 MB OTA partitions) |
-| WiFi | 802.11 b/g/n 2.4 GHz |
-| LED | WS2812 on GPIO21 |
-| Console | USB-Serial/JTAG |
+| Component | Spec                                                                                               |
+| --------- | -------------------------------------------------------------------------------------------------- |
+| Board     | [Waveshare ESP32-S3-ETH](https://www.waveshare.com/wiki/ESP32-S3-ETH) (or any ESP32-S3 with PSRAM) |
+| MCU       | ESP32-S3 dual-core Xtensa LX7 @ 240 MHz                                                            |
+| PSRAM     | 8 MB octal SPI                                                                                     |
+| Flash     | 16 MB (dual 4 MB OTA partitions)                                                                   |
+| WiFi      | 802.11 b/g/n 2.4 GHz                                                                               |
+| LED       | WS2812 on GPIO21                                                                                   |
+| Console   | USB-Serial/JTAG                                                                                    |
 
 > Any ESP32-S3 board with PSRAM should work. The W5500 Ethernet on the Waveshare board is not used by the broker — it connects via WiFi.
 
@@ -132,10 +133,18 @@ idf.py monitor
 5. Connect your MQTT clients to the device's IP on port **1883**
 
 ```bash
-# Test with mosquitto
-mosquitto_sub -h 192.168.x.x -t "test/#" -v &
-mosquitto_pub -h 192.168.x.x -t "test/hello" -m "world"
+# Test with mosquitto (by IP, or by mDNS hostname)
+mosquitto_sub -h 192.168.x.x      -t "test/#" -v &
+mosquitto_sub -h mqtt_broker.local -t "test/#" -v &
+mosquitto_pub -h mqtt_broker.local -t "test/hello" -m "world"
+
+# Discover on the LAN via Bonjour/Avahi
+avahi-browse -rt _mqtt._tcp
 ```
+
+The default hostname is `mqtt_broker` and is configurable from the web portal
+(`/settings` → Device → Hostname). It is advertised over both DHCP and mDNS, so
+the device is reachable as `<hostname>.local` without needing to know its IP.
 
 ## Web Portal
 
@@ -176,12 +185,26 @@ curl http://192.168.x.x/api/clients
 ```json
 {
   "mqtt": [
-    {"client_id": "sensor-kitchen", "ip": "192.168.8.42", "connected_s": 3600, "last_active_s": 2, "subs": 3, "keep_alive": 60},
-    {"client_id": "thermostat-01", "ip": "192.168.8.50", "connected_s": 7200, "last_active_s": 0, "subs": 1, "keep_alive": 30}
+    {
+      "client_id": "sensor-kitchen",
+      "ip": "192.168.8.42",
+      "connected_s": 3600,
+      "last_active_s": 2,
+      "subs": 3,
+      "keep_alive": 60
+    },
+    {
+      "client_id": "thermostat-01",
+      "ip": "192.168.8.50",
+      "connected_s": 7200,
+      "last_active_s": 0,
+      "subs": 1,
+      "keep_alive": 30
+    }
   ],
   "wifi_ap": [
-    {"mac": "AA:BB:CC:DD:EE:01", "rssi": -45},
-    {"mac": "AA:BB:CC:DD:EE:02", "rssi": -62}
+    { "mac": "AA:BB:CC:DD:EE:01", "rssi": -45 },
+    { "mac": "AA:BB:CC:DD:EE:02", "rssi": -62 }
   ]
 }
 ```
@@ -249,23 +272,23 @@ The update page also shows current firmware information: version, build date, ID
 
 ### All Endpoints
 
-| Path | Method | Description |
-|------|--------|-------------|
-| `/` | GET | Main dashboard with live stats |
-| `/clients` | GET | Connected MQTT + WiFi AP clients (auto-refresh) |
-| `/settings` | GET | Settings form (MQTT, retain, AP) |
-| `/config` | GET | WiFi configuration form |
-| `/update` | GET | Firmware update page (upload + URL) |
-| `/ota-upload` | POST | OTA firmware upload (multipart/form-data) |
-| `/ota-url` | POST | OTA firmware fetch from URL |
-| `/save-settings` | POST | Save broker/AP settings to NVS |
-| `/save` | POST | Save WiFi credentials |
-| `/clear` | GET | Clear saved WiFi credentials |
-| `/reconnect` | GET | Reconnect to saved WiFi |
-| `/ap-toggle` | GET | Toggle AP mode |
-| `/reboot` | GET | Reboot the device |
-| `/api/status` | GET | JSON API — broker stats, firmware version |
-| `/api/clients` | GET | JSON API — connected MQTT + WiFi AP clients |
+| Path             | Method | Description                                     |
+| ---------------- | ------ | ----------------------------------------------- |
+| `/`              | GET    | Main dashboard with live stats                  |
+| `/clients`       | GET    | Connected MQTT + WiFi AP clients (auto-refresh) |
+| `/settings`      | GET    | Settings form (MQTT, retain, AP)                |
+| `/config`        | GET    | WiFi configuration form                         |
+| `/update`        | GET    | Firmware update page (upload + URL)             |
+| `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)       |
+| `/ota-url`       | POST   | OTA firmware fetch from URL                     |
+| `/save-settings` | POST   | Save broker/AP settings to NVS                  |
+| `/save`          | POST   | Save WiFi credentials                           |
+| `/clear`         | GET    | Clear saved WiFi credentials                    |
+| `/reconnect`     | GET    | Reconnect to saved WiFi                         |
+| `/ap-toggle`     | GET    | Toggle AP mode                                  |
+| `/reboot`        | GET    | Reboot the device                               |
+| `/api/status`    | GET    | JSON API — broker stats, firmware version       |
+| `/api/clients`   | GET    | JSON API — connected MQTT + WiFi AP clients     |
 
 ## Configuration
 
@@ -273,34 +296,36 @@ The update page also shows current firmware information: version, build date, ID
 
 These settings are configurable from the web UI at `/settings` and persisted in NVS:
 
-| Setting | Default | Range | Notes |
-|---------|---------|-------|-------|
-| MQTT Port | 1883 | 1–65535 | Takes effect after reboot |
-| Auth Username | *(empty)* | — | Empty = auth disabled |
-| Auth Password | *(empty)* | — | Only used when username is set |
-| Buffer Size | 16,384 | 1,024–65,536 | Per-client recv + shared send buffer |
-| Retained Messages | Enabled | on/off | Disable to reject all retain flags |
-| Retain TTL | 168 hours | 0–8,760 | 0 = never expire |
-| AP SSID | `mqtt-broker` | 1–32 chars | — |
-| AP Password | `mqtt1234` | 8–63 chars | WPA2-PSK |
-| AP IP Address | `192.168.25.1` | Valid IPv4 | Requires reboot; also configurable at compile time |
-| NAPT | Enabled | on/off | Ethernet builds only; toggles LAN ↔ AP routing immediately |
+| Setting           | Default        | Range                      | Notes                                                      |
+| ----------------- | -------------- | -------------------------- | ---------------------------------------------------------- |
+| MQTT Port         | 1883           | 1–65535                    | Takes effect after reboot                                  |
+| Auth Username     | _(empty)_      | —                          | Empty = auth disabled                                      |
+| Auth Password     | _(empty)_      | —                          | Only used when username is set                             |
+| Buffer Size       | 16,384         | 1,024–65,536               | Per-client recv + shared send buffer                       |
+| Retained Messages | Enabled        | on/off                     | Disable to reject all retain flags                         |
+| Retain TTL        | 168 hours      | 0–8,760                    | 0 = never expire                                           |
+| AP SSID           | `mqtt-broker`  | 1–32 chars                 | —                                                          |
+| AP Password       | `mqtt1234`     | 8–63 chars                 | WPA2-PSK                                                   |
+| AP IP Address     | `192.168.25.1` | Valid IPv4                 | Requires reboot; also configurable at compile time         |
+| Hostname          | `mqtt_broker`  | 1–32 chars `[A-Za-z0-9_-]` | Used for DHCP + mDNS (`<hostname>.local`); requires reboot |
+| NAPT              | Enabled        | on/off                     | Ethernet builds only; toggles LAN ↔ AP routing immediately |
 
 ### Compile-Time Settings
 
-| Setting | Default | File |
-|---------|---------|------|
-| Firmware version | 0.2.0 | `version.h` |
-| Max clients | 100 | `mqtt_broker.h` |
-| Max subscriptions | 2,048 | `mqtt_broker.h` |
-| MQTT port | 1883 | `mqtt_broker.h` |
-| Keepalive grace | 10 seconds | `mqtt_broker.h` |
-| Max retained msg size | 64 KB | `mqtt_broker.h` |
-| Retain memory cap | 80% PSRAM | `mqtt_broker.h` |
-| Default WiFi SSID | *(empty)* | `wifi_connect.h` |
-| AP IP Address | `192.168.25.1` | `Kconfig.projbuild` |
-| AP Netmask | `255.255.255.0` | `Kconfig.projbuild` |
-| LED GPIO | 21 | `main.c` |
+| Setting               | Default         | File                                         |
+| --------------------- | --------------- | -------------------------------------------- |
+| Firmware version      | 0.2.1           | `version.h`                                  |
+| Default hostname      | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`) |
+| Max clients           | 100             | `mqtt_broker.h`                              |
+| Max subscriptions     | 2,048           | `mqtt_broker.h`                              |
+| MQTT port             | 1883            | `mqtt_broker.h`                              |
+| Keepalive grace       | 10 seconds      | `mqtt_broker.h`                              |
+| Max retained msg size | 64 KB           | `mqtt_broker.h`                              |
+| Retain memory cap     | 80% PSRAM       | `mqtt_broker.h`                              |
+| Default WiFi SSID     | _(empty)_       | `wifi_connect.h`                             |
+| AP IP Address         | `192.168.25.1`  | `Kconfig.projbuild`                          |
+| AP Netmask            | `255.255.255.0` | `Kconfig.projbuild`                          |
+| LED GPIO              | 21              | `main.c`                                     |
 
 ## Architecture
 
@@ -308,12 +333,12 @@ The broker runs as a single FreeRTOS task pinned to Core 1 (Core 0 handles WiFi)
 
 ### Flash Partition Layout (16 MB)
 
-| Partition | Offset | Size | Purpose |
-|-----------|--------|------|---------|
-| nvs | 0x9000 | 24 KB | Settings, WiFi credentials, auth |
-| otadata | 0xF000 | 8 KB | OTA boot selection |
-| ota_0 | 0x20000 | 4 MB | App slot A |
-| ota_1 | 0x420000 | 4 MB | App slot B |
+| Partition | Offset   | Size  | Purpose                          |
+| --------- | -------- | ----- | -------------------------------- |
+| nvs       | 0x9000   | 24 KB | Settings, WiFi credentials, auth |
+| otadata   | 0xF000   | 8 KB  | OTA boot selection               |
+| ota_0     | 0x20000  | 4 MB  | App slot A                       |
+| ota_1     | 0x420000 | 4 MB  | App slot B                       |
 
 OTA updates alternate between ota_0 and ota_1. The running partition is never overwritten.
 
@@ -345,14 +370,14 @@ app_main()
 
 ### Memory Layout (8 MB PSRAM)
 
-| Allocation | Size | Notes |
-|------------|------|-------|
-| Client structs | ~10 KB | 100 × broker_client_t (without recv buf) |
-| Recv buffers | 1,600 KB | 100 × 16 KB (configurable) |
-| Subscription pool | 280 KB | 2,048 × broker_sub_t |
-| Send buffer | 16 KB | Shared, configurable |
-| Retained messages | Up to ~5,120 KB | 80% of remaining PSRAM |
-| **Free heap** | ~6,300 KB | Available for retained store + general use |
+| Allocation        | Size            | Notes                                      |
+| ----------------- | --------------- | ------------------------------------------ |
+| Client structs    | ~10 KB          | 100 × broker_client_t (without recv buf)   |
+| Recv buffers      | 1,600 KB        | 100 × 16 KB (configurable)                 |
+| Subscription pool | 280 KB          | 2,048 × broker_sub_t                       |
+| Send buffer       | 16 KB           | Shared, configurable                       |
+| Retained messages | Up to ~5,120 KB | 80% of remaining PSRAM                     |
+| **Free heap**     | ~6,300 KB       | Available for retained store + general use |
 
 ### Source Files
 
@@ -392,23 +417,23 @@ python3 test_broker.py 192.168.1.100 1883
 
 The test suite runs **59 assertions** across 15 test sections:
 
-| # | Test | What it verifies |
-|---|------|-----------------|
-| 1 | Basic Connect/Disconnect | CONNECT, empty client ID, PINGREQ/PINGRESP, DISCONNECT |
-| 2 | Publish/Subscribe | Single topic delivery, multi-topic delivery |
-| 3 | Wildcard Subscriptions | `+` match/exclude, `#` match/exclude, `$SYS` protection |
-| 4 | Retained Messages | Store + deliver to new subscriber, delete with empty payload |
-| 5 | Binary/Image Payloads | 100B to 15KB with MD5 integrity verification |
-| 6 | Concurrent Connections | 50 simultaneous clients, all respond to PING |
-| 7 | Message Throughput | 200 messages, 100% QoS 0 delivery rate |
-| 8 | Pub-to-Sub Latency | 50 samples, average under 300ms over WiFi |
-| 9 | Duplicate Client ID | Second client displaces first (per MQTT spec) |
-| 10 | Keep-Alive Enforcement | 2s keepalive, disconnected after timeout + grace |
-| 11 | Many Topics | 100 unique topics across 5 subscribers |
-| 12 | Web Portal API | JSON structure validation, all fields present |
-| 13 | Web Portal Pages | All pages return 200, unknown paths return 404 |
-| 14 | Portal Settings Save | POST save, persistence verification, input validation |
-| 15 | Unsubscribe | Receives before, silent after unsubscribe |
+| #   | Test                     | What it verifies                                             |
+| --- | ------------------------ | ------------------------------------------------------------ |
+| 1   | Basic Connect/Disconnect | CONNECT, empty client ID, PINGREQ/PINGRESP, DISCONNECT       |
+| 2   | Publish/Subscribe        | Single topic delivery, multi-topic delivery                  |
+| 3   | Wildcard Subscriptions   | `+` match/exclude, `#` match/exclude, `$SYS` protection      |
+| 4   | Retained Messages        | Store + deliver to new subscriber, delete with empty payload |
+| 5   | Binary/Image Payloads    | 100B to 15KB with MD5 integrity verification                 |
+| 6   | Concurrent Connections   | 50 simultaneous clients, all respond to PING                 |
+| 7   | Message Throughput       | 200 messages, 100% QoS 0 delivery rate                       |
+| 8   | Pub-to-Sub Latency       | 50 samples, average under 300ms over WiFi                    |
+| 9   | Duplicate Client ID      | Second client displaces first (per MQTT spec)                |
+| 10  | Keep-Alive Enforcement   | 2s keepalive, disconnected after timeout + grace             |
+| 11  | Many Topics              | 100 unique topics across 5 subscribers                       |
+| 12  | Web Portal API           | JSON structure validation, all fields present                |
+| 13  | Web Portal Pages         | All pages return 200, unknown paths return 404               |
+| 14  | Portal Settings Save     | POST save, persistence verification, input validation        |
+| 15  | Unsubscribe              | Receives before, silent after unsubscribe                    |
 
 ### Stress Test
 
@@ -422,23 +447,23 @@ Tests: 90 concurrent connections, 500-message throughput, wildcard routing, late
 
 ## LED Status
 
-| Pattern | Color | Meaning |
-|---------|-------|---------|
-| Fast blink | Blue | Booting |
-| 2-blink | Yellow | Connecting to WiFi |
-| 3-blink | Red | WiFi failed, AP mode active |
-| Slow pulse | Green | WiFi connected, broker running |
-| Slow pulse | Cyan | AP-only mode, portal running |
-| Slow pulse | White | Ethernet gateway mode (W5500 connected + WiFi AP) |
+| Pattern    | Color  | Meaning                                           |
+| ---------- | ------ | ------------------------------------------------- |
+| Fast blink | Blue   | Booting                                           |
+| 2-blink    | Yellow | Connecting to WiFi                                |
+| 3-blink    | Red    | WiFi failed, AP mode active                       |
+| Slow pulse | Green  | WiFi connected, broker running                    |
+| Slow pulse | Cyan   | AP-only mode, portal running                      |
+| Slow pulse | White  | Ethernet gateway mode (W5500 connected + WiFi AP) |
 
 ## Network Modes
 
 The device operates in one of these WiFi modes:
 
-| Mode | When | Broker | Portal |
-|------|------|--------|--------|
-| **STA** | Connected to WiFi, AP disabled | `<WiFi IP>:1883` | `<WiFi IP>:80` |
-| **AP+STA** | Connected to WiFi, AP enabled (default) | `<WiFi IP>:1883` | Both IPs on `:80` |
+| Mode        | When                                     | Broker              | Portal            |
+| ----------- | ---------------------------------------- | ------------------- | ----------------- |
+| **STA**     | Connected to WiFi, AP disabled           | `<WiFi IP>:1883`    | `<WiFi IP>:80`    |
+| **AP+STA**  | Connected to WiFi, AP enabled (default)  | `<WiFi IP>:1883`    | Both IPs on `:80` |
 | **AP only** | No WiFi credentials or connection failed | `192.168.25.1:1883` | `192.168.25.1:80` |
 
 ### Ethernet Gateway (W5500)
@@ -499,14 +524,14 @@ idf.py build
 
 **SPI Pin Configuration (via menuconfig):**
 
-| Signal | Default GPIO | Kconfig Key |
-|--------|-------------|-------------|
-| MOSI | 11 | `CONFIG_ETH_SPI_MOSI` |
-| MISO | 13 | `CONFIG_ETH_SPI_MISO` |
-| SCLK | 12 | `CONFIG_ETH_SPI_SCLK` |
-| CS | 10 | `CONFIG_ETH_SPI_CS` |
-| INT | 4 | `CONFIG_ETH_SPI_INT` |
-| RST | 5 | `CONFIG_ETH_SPI_RST` |
+| Signal | Default GPIO | Kconfig Key           |
+| ------ | ------------ | --------------------- |
+| MOSI   | 11           | `CONFIG_ETH_SPI_MOSI` |
+| MISO   | 13           | `CONFIG_ETH_SPI_MISO` |
+| SCLK   | 12           | `CONFIG_ETH_SPI_SCLK` |
+| CS     | 10           | `CONFIG_ETH_SPI_CS`   |
+| INT    | 4            | `CONFIG_ETH_SPI_INT`  |
+| RST    | 5            | `CONFIG_ETH_SPI_RST`  |
 
 Adjust via `idf.py menuconfig` > MQTT Broker Configuration.
 
