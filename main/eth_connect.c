@@ -8,9 +8,12 @@
  * SPI pin assignments are configured via Kconfig (main/Kconfig.projbuild).
  */
 
+#include "sdkconfig.h"
+
 #ifdef CONFIG_MQTT_BROKER_ETHERNET
 
 #include "eth_connect.h"
+#include "portal.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -174,6 +177,19 @@ esp_err_t eth_init(void)
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
     ret = esp_netif_attach(s_eth_netif, glue);
+    if (ret == ESP_OK) {
+        char host[33] = "";
+        portal_get_hostname(host, sizeof(host));
+        if (host[0]) {
+            esp_err_t herr = esp_netif_set_hostname(s_eth_netif, host);
+            if (herr == ESP_OK) {
+                ESP_LOGI(TAG, "Ethernet hostname set: '%s'", host);
+            } else {
+                ESP_LOGW(TAG, "esp_netif_set_hostname (eth) failed: %s",
+                         esp_err_to_name(herr));
+            }
+        }
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Netif attach failed: %s", esp_err_to_name(ret));
         esp_netif_destroy(s_eth_netif);

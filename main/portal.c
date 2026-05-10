@@ -162,6 +162,47 @@ static void nvs_settings_set_i32(const char *key, int32_t val)
     }
 }
 
+/* ---- Hostname helpers ---- */
+
+#ifndef CONFIG_MQTT_BROKER_HOSTNAME
+#define CONFIG_MQTT_BROKER_HOSTNAME "mqtt_broker"
+#endif
+
+void portal_get_hostname(char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return;
+    /* Default from Kconfig */
+    strncpy(out, CONFIG_MQTT_BROKER_HOSTNAME, out_size - 1);
+    out[out_size - 1] = '\0';
+    /* NVS override ("mqtt_cfg" / "hostname") if non-empty */
+    nvs_handle_t h;
+    if (nvs_open(NVS_SETTINGS_NS, NVS_READONLY, &h) == ESP_OK) {
+        char buf[33] = "";
+        size_t len = sizeof(buf);
+        if (nvs_get_str(h, "hostname", buf, &len) == ESP_OK && buf[0] != '\0') {
+            strncpy(out, buf, out_size - 1);
+            out[out_size - 1] = '\0';
+        }
+        nvs_close(h);
+    }
+}
+
+/* Validate hostname: 1-32 chars, [A-Za-z0-9_-], no leading/trailing '-'. */
+static int hostname_is_valid(const char *s)
+{
+    if (!s) return 0;
+    size_t n = strlen(s);
+    if (n == 0 || n > 32) return 0;
+    if (s[0] == '-' || s[n - 1] == '-') return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
 /* ---- HTTP Request Parser ---- */
 
 typedef enum {
@@ -1093,11 +1134,23 @@ static void handle_http_client(int client_fd)
         nvs_settings_get_str("auth_pass", auth_pass, sizeof(auth_pass), "");
         nvs_settings_get_str("ap_ssid", ap_ssid, sizeof(ap_ssid), "mqtt-broker");
         nvs_settings_get_str("ap_pass", ap_pass, sizeof(ap_pass), "mqtt1234");
+        char hostname[33] = "";
+        portal_get_hostname(hostname, sizeof(hostname));
+
+        /* Device / network identity */
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<fieldset><legend>&nbsp;Device&nbsp;</legend>"
+            "<form method='POST' action='/save-settings'>"
+            "<label>Hostname (requires reboot)</label>"
+            "<input type='text' name='hostname' value='%s' "
+            "pattern='[A-Za-z0-9_\\-]{1,32}' maxlength='32' required "
+            "title='1-32 chars: letters, digits, hyphen, underscore'>"
+            "</fieldset>",
+            hostname);
 
         /* MQTT settings */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;MQTT Broker&nbsp;</legend>"
-            "<form method='POST' action='/save-settings'>"
             "<label>MQTT Port</label>"
             "<input type='number' name='mqtt_port' value='%u' min='1' max='65535'>"
             "<label>Auth Username (blank = disabled)</label>"
@@ -1173,6 +1226,14 @@ static void handle_http_client(int client_fd)
     } else if (strcmp(req.path, "/save-settings") == 0 && req.method == REQ_POST) {
         char val[65];
 
+        if (urldecode_param(req.body, "hostname", val, sizeof(val))) {
+            if (hostname_is_valid(val)) {
+                nvs_settings_set_str("hostname", val);
+                ESP_LOGI(TAG, "Saved hostname: '%s' (reboot required)", val);
+            } else {
+                ESP_LOGW(TAG, "Hostname rejected: invalid '%s'", val);
+            }
+        }
         if (urldecode_param(req.body, "mqtt_port", val, sizeof(val))) {
             int port = atoi(val);
             if (port > 0 && port <= 65535) {

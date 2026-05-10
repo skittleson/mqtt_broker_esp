@@ -76,4 +76,12 @@ int portal_get_sta_status(int *sta_connected, int *ap_running,
                            char *ip_str, size_t ip_size,
                            char *ssid_str, size_t ssid_size);
 
+/**
+ * Read the configured network hostname.
+ * Reads NVS key "hostname" (namespace "mqtt_cfg"); falls back to
+ * CONFIG_MQTT_BROKER_HOSTNAME when unset/empty.
+ * Result is always null-terminated; out_size should be ≥ 33.
+ */
+void portal_get_hostname(char *out, size_t out_size);
+
 #endif /* PORTAL_H */

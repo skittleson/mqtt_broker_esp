@@ -9,6 +9,7 @@
 #include "wifi_connect.h"
 #include "portal.h"
 #include "led_strip.h"
+#include "mdns.h"
 
 #ifdef CONFIG_MQTT_BROKER_ETHERNET
 #include "eth_connect.h"
@@ -223,6 +224,26 @@ void app_main(void)
         ESP_LOGW(TAG, "Ethernet init failed — continuing WiFi-only");
     }
 #endif
+
+    /* Start mDNS (advertises <hostname>.local + _mqtt._tcp / _http._tcp).
+     * Safe to start even in AP-only mode — it'll bind to whichever
+     * netifs are up. */
+    {
+        char host[33] = "";
+        portal_get_hostname(host, sizeof(host));
+        if (host[0]) {
+            esp_err_t mret = mdns_init();
+            if (mret == ESP_OK) {
+                mdns_hostname_set(host);
+                mdns_instance_name_set("ESP32 MQTT Broker");
+                mdns_service_add(NULL, "_mqtt", "_tcp", 1883, NULL, 0);
+                mdns_service_add(NULL, "_http", "_tcp", 80,   NULL, 0);
+                ESP_LOGI(TAG, "mDNS started: %s.local", host);
+            } else {
+                ESP_LOGW(TAG, "mdns_init failed: %s", esp_err_to_name(mret));
+            }
+        }
+    }
 
     /* Start MQTT broker */
     ESP_LOGI(TAG, "Starting MQTT broker...");

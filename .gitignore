@@ -29,3 +29,4 @@ captured_mqtt*.json
 # OS
 .DS_Store
 Thumbs.db
+nvs_wifi.csv

@@ -291,7 +291,21 @@ int wifi_connect_sta(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+
+    /* Apply configured hostname before DHCP starts negotiating. */
+    {
+        char host[33] = "";
+        portal_get_hostname(host, sizeof(host));
+        if (sta_netif && host[0]) {
+            esp_err_t herr = esp_netif_set_hostname(sta_netif, host);
+            if (herr == ESP_OK) {
+                ESP_LOGI(TAG, "STA hostname set: '%s'", host);
+            } else {
+                ESP_LOGW(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(herr));
+            }
+        }
+    }
 
     /* Register WiFi event handlers BEFORE calling esp_wifi_init (v0.2 fix) */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -351,6 +365,11 @@ int wifi_connect_sta(void)
     /* ESP32-S3 v0.2: must create AP netif BEFORE esp_wifi_set_mode */
     esp_netif_t *ap_nif = esp_netif_create_default_wifi_ap();
     apply_ap_ip(ap_nif);
+    {
+        char host[33] = "";
+        portal_get_hostname(host, sizeof(host));
+        if (ap_nif && host[0]) esp_netif_set_hostname(ap_nif, host);
+    }
     esp_wifi_set_mode(s_wifi_mode);
     esp_wifi_start();
 
