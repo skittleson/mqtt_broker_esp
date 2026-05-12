@@ -70,6 +70,7 @@ typedef struct {
     char     client_id[64];   /* MQTT client identifier */
     char     ip[16];          /* IP address string */
     int      subscriptions;   /* number of active subscriptions */
+    uint32_t published;       /* total PUBLISH messages accepted from this client */
     int64_t  connected_ms;    /* how long connected (milliseconds) */
     int64_t  last_active_ms;  /* ms since last activity */
     uint16_t keep_alive;      /* negotiated keep-alive (seconds) */

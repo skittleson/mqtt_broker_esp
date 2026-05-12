@@ -71,6 +71,21 @@ void portal_set_portal_ssid(const char *ssid)
     }
 }
 
+/* ---- Sort comparators ---- */
+
+/* qsort comparator for broker_client_info_t: ascending by last IP octet.
+ * Unparseable IPs sort to 0. */
+static int cmp_client_by_last_octet(const void *pa, const void *pb)
+{
+    const broker_client_info_t *a = (const broker_client_info_t *)pa;
+    const broker_client_info_t *b = (const broker_client_info_t *)pb;
+    const char *da = strrchr(a->ip, '.');
+    const char *db = strrchr(b->ip, '.');
+    int oa = da ? atoi(da + 1) : 0;
+    int ob = db ? atoi(db + 1) : 0;
+    return oa - ob;
+}
+
 /* ---- NVS settings helpers ---- */
 
 static void nvs_settings_get_str(const char *key, char *out, size_t out_size, const char *def)
@@ -417,10 +432,15 @@ static void http_send_page(int fd, const char *body_content, size_t body_len)
         "input[type=checkbox],input[type=radio]{width:1em;margin-right:6px;vertical-align:-1px}"
         "body{text-align:center;font-family:verdana,sans-serif;background:#252525;color:#eaeaea}"
         "td{padding:0px}"
-        "button{border:0;border-radius:0.3rem;background:#1fa3ec;color:#faffff;"
+        "button,.btn{border:0;border-radius:0.3rem;background:#1fa3ec;color:#faffff;"
         "line-height:2.4rem;font-size:1.2rem;width:100%;"
-        "transition-duration:0.4s;cursor:pointer}"
-        "button:hover{background:#0e70a4}"
+        "transition-duration:0.4s;cursor:pointer;box-sizing:border-box}"
+        /* Anchor-as-button: used for plain GET navigation so the URL
+         * doesn't pick up a trailing '?' the way an empty <form> would. */
+        ".btn{display:block;margin:4px 0;text-align:center;text-decoration:none;"
+        "padding:0;font-family:inherit}"
+        "button:hover,.btn:hover{background:#0e70a4;color:#faffff}"
+        ".btn:visited{color:#faffff}"
         ".bred{background:#d43535}.bred:hover{background:#931f1f}"
         ".bgrn{background:#47c266}.bgrn:hover{background:#2d9e46}"
         ".bgry{background:#888}.bgry:hover{background:#666}"
@@ -959,13 +979,13 @@ static void handle_http_client(int client_fd)
         /* Tasmota-style navigation buttons */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<br>"
-            "<form action='/config'><button>Configure WiFi</button></form>"
-            "<form action='/settings'><button>Configuration</button></form>"
-            "<form action='/clients'><button>Connected Clients</button></form>"
-            "<form action='/information'><button>Information</button></form>"
-            "<form action='/update'><button class='bgry'>Firmware Upgrade</button></form>"
-            "<form action='/reboot' onsubmit=\"return confirm('Restart?')\">"
-            "<button class='bred'>Restart</button></form>");
+            "<a href='/config' class='btn'>Configure WiFi</a>"
+            "<a href='/settings' class='btn'>Configuration</a>"
+            "<a href='/clients' class='btn'>Connected Clients</a>"
+            "<a href='/information' class='btn'>Information</a>"
+            "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
+            "<a href='/reboot' class='btn bred' "
+            "onclick=\"return confirm('Restart?')\">Restart</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 
@@ -1115,7 +1135,7 @@ static void handle_http_client(int client_fd)
             (unsigned long)(flash_size / 1024));
 
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-            "<br><form action='/'><button>Main Menu</button></form>");
+            "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 
@@ -1218,7 +1238,7 @@ static void handle_http_client(int client_fd)
             "</fieldset>"
             "<br><button type='submit' class='bgrn'>Save</button>"
             "</form>"
-            "<br><form action='/'><button>Main Menu</button></form>");
+            "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 
@@ -1336,7 +1356,7 @@ static void handle_http_client(int client_fd)
             "Enable AP mode alongside WiFi</label></p>"
             "<br><button type='submit' class='bgrn'>Save</button>"
             "</form></fieldset>"
-            "<br><form action='/'><button>Main Menu</button></form>",
+            "<br><a href='/' class='btn'>Main Menu</a>",
             s_portal_ap_mode ? "checked" : "");
 
         http_send_page(client_fd, body, (size_t)pos);
@@ -1414,6 +1434,13 @@ static void handle_http_client(int client_fd)
         int mqtt_count = 0;
         if (clients) {
             mqtt_count = broker_get_clients(clients, BROKER_MAX_CLIENTS);
+
+            /* Sort numerically by last octet of IP (a.b.c.X). Unparseable
+             * IPs sort to 0. Comparator is at file scope (see above). */
+            if (mqtt_count > 1) {
+                qsort(clients, mqtt_count, sizeof(broker_client_info_t),
+                      cmp_client_by_last_octet);
+            }
         }
 
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
@@ -1425,12 +1452,13 @@ static void handle_http_client(int client_fd)
         } else {
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                 "<table><tr>"
-                "<th style='width:25%%'>Client ID</th>"
-                "<th style='width:20%%'>IP Address</th>"
-                "<th style='width:15%%'>Connected</th>"
-                "<th style='width:15%%'>Last Active</th>"
-                "<th style='width:10%%'>Subs</th>"
-                "<th style='width:15%%'>Keep-Alive</th>"
+                "<th style='width:22%%'>Client ID</th>"
+                "<th style='width:18%%'>IP Address</th>"
+                "<th style='width:13%%'>Connected</th>"
+                "<th style='width:13%%'>Last Active</th>"
+                "<th style='width:8%%' title='Active subscriptions'>Subs</th>"
+                "<th style='width:13%%' title='PUBLISH packets accepted from this client since it connected'>Published</th>"
+                "<th style='width:13%%'>Keep-Alive</th>"
                 "</tr>");
 
             for (int i = 0; i < mqtt_count && pos < PAGE_BUF_SIZE - 256; i++) {
@@ -1442,14 +1470,16 @@ static void handle_http_client(int client_fd)
                 int last_sec = (int)(clients[i].last_active_ms / 1000);
 
                 pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                    "<tr><td>%s</td><td>%s</td>"
+                    "<tr><td>%s</td>"
+                    "<td><a href='http://%s/' target='_blank' rel='noopener'>%s</a></td>"
                     "<td>%dh %dm %ds</td><td>%ds ago</td>"
-                    "<td>%d</td><td>%us</td></tr>",
+                    "<td>%d</td><td>%lu</td><td>%us</td></tr>",
                     clients[i].client_id[0] ? clients[i].client_id : "<em>(empty)</em>",
-                    clients[i].ip,
+                    clients[i].ip, clients[i].ip,
                     conn_h, conn_m, conn_s,
                     last_sec,
                     clients[i].subscriptions,
+                    (unsigned long)clients[i].published,
                     clients[i].keep_alive);
             }
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table>");
@@ -1493,7 +1523,7 @@ static void handle_http_client(int client_fd)
             "<p style='color:#888;font-size:0.85em;text-align:center'>"
             "Page auto-refreshes every 5 seconds</p>"
             "<script>setTimeout(function(){location.reload();},5000);</script>"
-            "<br><form action='/'><button>Main Menu</button></form>");
+            "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 
@@ -1516,11 +1546,12 @@ static void handle_http_client(int client_fd)
             pos += snprintf(json + pos, PAGE_BUF_SIZE - pos,
                 "{\"client_id\":\"%s\",\"ip\":\"%s\","
                 "\"connected_s\":%lld,\"last_active_s\":%lld,"
-                "\"subs\":%d,\"keep_alive\":%u}",
+                "\"subs\":%d,\"published\":%lu,\"keep_alive\":%u}",
                 clients[i].client_id, clients[i].ip,
                 (long long)(clients[i].connected_ms / 1000),
                 (long long)(clients[i].last_active_ms / 1000),
                 clients[i].subscriptions,
+                (unsigned long)clients[i].published,
                 clients[i].keep_alive);
         }
         pos += snprintf(json + pos, PAGE_BUF_SIZE - pos, "],");
@@ -1626,7 +1657,7 @@ static void handle_http_client(int client_fd)
             "</form></fieldset>");
 
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-            "<br><form action='/'><button>Main Menu</button></form>");
+            "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 

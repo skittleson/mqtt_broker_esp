@@ -47,6 +47,7 @@ typedef struct {
     uint16_t keep_alive;                        /* negotiated keep-alive (seconds) */
     int64_t  last_activity;                     /* timestamp of last packet (ms) */
     int64_t  connected_at;                      /* timestamp when CONNECT accepted (ms) */
+    uint32_t published;                         /* count of accepted PUBLISH packets from this client */
     bool     connected;                         /* CONNECT received and accepted */
     bool     authenticated;                     /* credentials validated */
 } broker_client_t;
@@ -129,6 +130,7 @@ static void client_disconnect(int idx)
     c->authenticated = false;
     c->recv_len = 0;
     c->client_id[0] = '\0';
+    c->published = 0;
 
     /* Remove all subscriptions for this client */
     for (int i = 0; i < BROKER_MAX_SUBSCRIPTIONS; i++) {
@@ -601,6 +603,9 @@ static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)
         return;
     }
 
+    /* Count accepted PUBLISH packets per client (for /clients page stats). */
+    c->published++;
+
     ESP_LOGD(TAG, "PUB '%s' (%lu bytes) from client %d",
              pub.topic, (unsigned long)pub.payload_len, idx);
 
@@ -1041,6 +1046,7 @@ int broker_get_clients(broker_client_info_t *out, int max_out)
             }
         }
         out[n].subscriptions = subs;
+        out[n].published = s_clients[i].published;
         n++;
     }
 
