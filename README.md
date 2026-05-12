@@ -327,6 +327,49 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 | AP Netmask            | `255.255.255.0` | `Kconfig.projbuild`                          |
 | LED GPIO              | 21              | `main.c`                                     |
 
+### Scaling the Client Limit
+
+The broker is configured for **100 concurrent MQTT clients** out of the box. If
+you need more (or want to free memory by allowing fewer), three settings have
+to stay in agreement:
+
+| Setting                      | Default | Where                              | Rule                                          |
+| ---------------------------- | ------- | ---------------------------------- | --------------------------------------------- |
+| `MQTT_BROKER_MAX_CLIENTS`    | 100     | `main/mqtt_broker.h`               | Broker-level cap on accepted MQTT clients     |
+| `CONFIG_LWIP_MAX_SOCKETS`    | 115     | `sdkconfig` / `sdkconfig.defaults` | ≥ max_clients + ~15 (listener + portal + DNS) |
+| `CONFIG_LWIP_MAX_ACTIVE_TCP` | 115     | `sdkconfig` / `sdkconfig.defaults` | Same as `MAX_SOCKETS`                         |
+
+The ~15 headroom covers: 1 MQTT listen socket, the HTTP portal (up to ~5
+concurrent), the DNS hijack socket, mDNS, OTA HTTP fetch, and short-lived
+sockets during accept/close transitions.
+
+Memory cost of raising the limit (per added client):
+
+- ~16 KB PSRAM recv buffer (configurable via `/settings` Buffer Size)
+- ~100 bytes of internal client struct
+- ~2 KB of lwIP per-socket overhead in DRAM (this is the tight constraint)
+
+In practice **150 clients is the realistic ceiling** on an ESP32-S3 with 8 MB
+PSRAM before internal DRAM (not PSRAM) for lwIP runs out. Past that you should
+run two brokers and partition your devices between them.
+
+To change it:
+
+```bash
+# 1. Edit main/mqtt_broker.h
+#    #define MQTT_BROKER_MAX_CLIENTS 150
+
+# 2. Edit sdkconfig (or run menuconfig → Component config → LWIP)
+#    CONFIG_LWIP_MAX_SOCKETS=165
+#    CONFIG_LWIP_MAX_ACTIVE_TCP=165
+
+idf.py fullclean && idf.py build flash
+```
+
+If you forget step 2, new clients will silently fail to connect once the lwIP
+socket pool is exhausted — even though the broker still has free MQTT client
+slots.
+
 ## Architecture
 
 The broker runs as a single FreeRTOS task pinned to Core 1 (Core 0 handles WiFi). It uses a `select()` event loop for non-blocking I/O across all client sockets.
