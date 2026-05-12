@@ -48,6 +48,8 @@
 #include "eth_connect.h"
 #endif
 
+#include "portal_ws.h"
+
 static const char *TAG = "portal";
 
 #define PORTAL_HTTP_PORT    80
@@ -884,6 +886,54 @@ static void handle_http_client(int client_fd)
         return;
     }
 
+    /* ---- WebSocket upgrade for /tester ----
+     * Detected on the raw header buffer (like OTA) because the upgrade
+     * needs the original Sec-WebSocket-Key header which http_parse drops.
+     * Auth is enforced here using the same NVS credentials as the rest of
+     * the portal. portal_ws_handle_upgrade() takes ownership of client_fd
+     * on success. */
+    if (strncmp(buf, "GET ", 4) == 0 && strstr(buf, " /ws ") &&
+        (strstr(buf, "Upgrade: websocket") || strstr(buf, "Upgrade:websocket") ||
+         strstr(buf, "upgrade: websocket"))) {
+
+        char *buf_copy = (char *)malloc(total + 1);
+        if (!buf_copy) { free(buf); close(client_fd); return; }
+        memcpy(buf_copy, buf, total);
+        buf_copy[total] = '\0';
+
+        http_request_t auth_req;
+        http_parse((const uint8_t *)buf_copy, (size_t)total, &auth_req);
+        free(buf_copy);
+
+        char cfg_user[65] = "";
+        char cfg_pass[65] = "";
+        nvs_settings_get_str("auth_user", cfg_user, sizeof(cfg_user), "");
+        nvs_settings_get_str("auth_pass", cfg_pass, sizeof(cfg_pass), "");
+
+        if (cfg_user[0] != '\0' && cfg_pass[0] != '\0') {
+            bool auth_ok = (strcmp(auth_req.auth_user, cfg_user) == 0 &&
+                            strcmp(auth_req.auth_pass, cfg_pass) == 0);
+            if (!auth_ok) {
+                const char *resp =
+                    "HTTP/1.1 401 Unauthorized\r\n"
+                    "WWW-Authenticate: Basic realm=\"MQTT Broker\"\r\n"
+                    "Content-Length: 12\r\n"
+                    "Connection: close\r\n\r\nUnauthorized";
+                send(client_fd, resp, strlen(resp), MSG_NOSIGNAL);
+                free(buf);
+                close(client_fd);
+                return;
+            }
+        }
+
+        bool took = portal_ws_handle_upgrade(client_fd, buf, (size_t)total);
+        free(buf);
+        if (!took) {
+            /* portal_ws_handle_upgrade closes the socket on failure. */
+        }
+        return;  /* either the WS task owns the fd now, or it's already closed */
+    }
+
     http_request_t req;
     http_parse((const uint8_t *)buf, (size_t)total, &req);
     free(buf);  /* done with recv buffer */
@@ -923,8 +973,85 @@ static void handle_http_client(int client_fd)
         }
     }
 
+    /* ============ MQTT TESTER PAGE ============
+     * Vanilla HTML + JS, no framework. Opens a WS to /ws on this host.
+     * All payload/topic text is rendered via textContent to avoid XSS.
+     * $SYS topics are hidden by default (toggle in UI). */
+    if (strcmp(req.path, "/tester") == 0) {
+        int pos = snprintf(body, PAGE_BUF_SIZE,
+"<style>"
+".tester{font-family:sans-serif}"
+".row{display:flex;gap:8px;align-items:center;margin:4px 0}"
+".row label{min-width:80px}"
+".row input[type=text],.row textarea{flex:1;padding:4px}"
+".st-conn{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.85em}"
+".st-on{background:#2a7;color:#fff}.st-off{background:#a33;color:#fff}"
+"#log{font-family:monospace;font-size:.85em;background:#1a1a1a;color:#eaeaea;"
+"padding:8px;height:380px;overflow:auto;border:1px solid #444}"
+"#log .msg{border-bottom:1px solid #333;padding:2px 0}"
+"#log .t{color:#6cf}#log .ts{color:#888}#log .r{color:#f90}"
+"#log pre{margin:2px 0 0 12px;white-space:pre-wrap;word-break:break-all;color:#dfd}"
+"</style>"
+"<div class='tester'>"
+"<h3>MQTT Tester <span id='conn' class='st-conn st-off'>disconnected</span></h3>"
+"<fieldset><legend>&nbsp;Publish&nbsp;</legend>"
+"<div class='row'><label>Topic</label><input id='ptopic' type='text' maxlength='128' placeholder='home/light/1'></div>"
+"<div class='row'><label>Payload</label><textarea id='ppayload' rows='2' maxlength='256'></textarea></div>"
+"<div class='row'><label>Options</label>"
+"<label><input type='checkbox' id='pretain'> retain</label>"
+"<button id='pbtn' class='btn'>Publish</button>"
+"<span id='perr' style='color:#f33;margin-left:8px'></span>"
+"</div></fieldset>"
+"<fieldset><legend>&nbsp;Subscribe (all topics)&nbsp;</legend>"
+"<div class='row'><label>Filter</label><input id='filter' type='text' placeholder='substring match, supports + and # as substring'>"
+"<label><input type='checkbox' id='showsys'> show $SYS/</label>"
+"<button id='pause' class='btn'>Pause</button>"
+"<button id='clear' class='btn'>Clear</button>"
+"</div>"
+"<div id='log'></div>"
+"</fieldset>"
+"<p><a href='/' class='btn'>Back</a></p>"
+"</div>"
+"<script>(function(){"
+"var ws=null,paused=false,reconnectMs=2000,backoffMax=30000;"
+"var msgs=[],MAX=200;"
+"var conn=document.getElementById('conn');"
+"var logEl=document.getElementById('log');"
+"var filterEl=document.getElementById('filter');"
+"var showsys=document.getElementById('showsys');"
+"function setConn(on){conn.textContent=on?'connected':'disconnected';conn.className='st-conn '+(on?'st-on':'st-off');}"
+"function matchFilter(t){var f=filterEl.value.trim();if(!showsys.checked&&t.indexOf('$SYS/')===0)return false;if(!f)return true;"
+"if(f.indexOf('#')>=0||f.indexOf('+')>=0){f=f.replace(/#/g,'').replace(/\\+/g,'');}return t.indexOf(f)>=0;}"
+"function render(){logEl.innerHTML='';for(var i=msgs.length-1;i>=0;i--){var m=msgs[i];if(!matchFilter(m.t))continue;"
+"var d=document.createElement('div');d.className='msg';"
+"var ts=document.createElement('span');ts.className='ts';ts.textContent=m.ts+' ';d.appendChild(ts);"
+"var t=document.createElement('span');t.className='t';t.textContent=m.t;d.appendChild(t);"
+"if(m.r){var r=document.createElement('span');r.className='r';r.textContent=' [retained]';d.appendChild(r);}"
+"if(m.trunc){var tr=document.createElement('span');tr.className='r';tr.textContent=' [truncated]';d.appendChild(tr);}"
+"var p=document.createElement('pre');p.textContent=m.p;d.appendChild(p);"
+"logEl.appendChild(d);}}"
+"function tsNow(){var d=new Date();var p=function(n){return(n<10?'0':'')+n;};return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}"
+"function onMsg(ev){if(paused)return;var o;try{o=JSON.parse(ev.data);}catch(e){return;}"
+"if(o.hello){return;}if(o.error){var d=document.createElement('div');d.className='msg';d.style.color='#f66';d.textContent='[error] '+o.error;logEl.insertBefore(d,logEl.firstChild);return;}"
+"if(typeof o.t!=='string')return;msgs.push({ts:tsNow(),t:o.t,p:o.p||'',r:o.r===1,trunc:!!o.trunc});"
+"if(msgs.length>MAX)msgs=msgs.slice(msgs.length-MAX);render();}"
+"function connect(){var url=(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';"
+"try{ws=new WebSocket(url);}catch(e){setConn(false);return scheduleReconnect();}"
+"ws.onopen=function(){setConn(true);reconnectMs=2000;};"
+"ws.onmessage=onMsg;ws.onerror=function(){};ws.onclose=function(){setConn(false);scheduleReconnect();};}"
+"function scheduleReconnect(){setTimeout(connect,reconnectMs);reconnectMs=Math.min(reconnectMs*2,backoffMax);}"
+"document.getElementById('pbtn').onclick=function(){var t=document.getElementById('ptopic').value;var p=document.getElementById('ppayload').value;var r=document.getElementById('pretain').checked;var err=document.getElementById('perr');err.textContent='';"
+"if(!t){err.textContent='topic required';return;}if(t.indexOf('#')>=0||t.indexOf('+')>=0){err.textContent='no wildcards in publish topic';return;}"
+"if(!ws||ws.readyState!==1){err.textContent='not connected';return;}"
+"ws.send(JSON.stringify({action:'publish',topic:t,payload:p,retain:r}));};"
+"document.getElementById('pause').onclick=function(){paused=!paused;this.textContent=paused?'Resume':'Pause';};"
+"document.getElementById('clear').onclick=function(){msgs=[];render();};"
+"filterEl.oninput=render;showsys.onchange=render;"
+"connect();})();</script>");
+        http_send_page(client_fd, body, (size_t)pos);
+
     /* ============ MAIN STATUS PAGE ============ */
-    if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/index.html") == 0) {
+    } else if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/index.html") == 0) {
         int pos = 0;
 
         /* WiFi status banner */
@@ -982,6 +1109,7 @@ static void handle_http_client(int client_fd)
             "<a href='/config' class='btn'>Configure WiFi</a>"
             "<a href='/settings' class='btn'>Configuration</a>"
             "<a href='/clients' class='btn'>Connected Clients</a>"
+            "<a href='/tester' class='btn'>MQTT Tester</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
             "<a href='/reboot' class='btn bred' "

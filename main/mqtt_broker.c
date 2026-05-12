@@ -27,6 +27,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/stream_buffer.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
@@ -91,6 +93,220 @@ static broker_sub_t     *s_subs = NULL;
 static uint8_t          *s_send_buf = NULL;
 static int              s_server_fd = -1;
 static int              s_num_connected = 0;
+
+#if BROKER_TESTER_ENABLED
+
+/* ---- Tester state ----
+ * Producer (events): broker_task only.
+ * Consumers (events): N WS tasks.
+ * Producer (publish requests): N WS tasks.
+ * Consumer (publish requests): broker_task only.
+ *
+ * The consumer registry is mutated rarely (on WS connect/disconnect) and
+ * read on every PUBLISH. Use a portMUX critical section to guard it; the
+ * fanout path holds it for a few microseconds only.
+ */
+typedef struct {
+    void *sb;            /* StreamBufferHandle_t (void* to keep header light) */
+    bool  active;
+} tester_consumer_t;
+
+typedef struct {
+    char     topic[BROKER_TESTER_MAX_TOPIC_LEN + 1];
+    uint16_t topic_len;
+    uint8_t  payload[BROKER_TESTER_MAX_PAYLOAD_LEN];
+    uint16_t payload_len;
+    bool     retain;
+} tester_pub_req_t;
+
+static tester_consumer_t  s_tester_consumers[BROKER_TESTER_MAX_CONSUMERS];
+static portMUX_TYPE       s_tester_mux = portMUX_INITIALIZER_UNLOCKED;
+static QueueHandle_t      s_tester_pub_q = NULL;
+static bool               s_tester_inited = false;
+static uint32_t           s_tester_seq = 0;
+static broker_tester_stats_t s_tester_stats = {0};
+
+bool broker_tester_init(void)
+{
+    if (s_tester_inited) return true;
+    s_tester_pub_q = xQueueCreate(8, sizeof(tester_pub_req_t));
+    if (!s_tester_pub_q) {
+        ESP_LOGE(TAG, "tester: queue create failed; tester disabled");
+        return false;
+    }
+    for (int i = 0; i < BROKER_TESTER_MAX_CONSUMERS; i++) {
+        s_tester_consumers[i].sb = NULL;
+        s_tester_consumers[i].active = false;
+    }
+    s_tester_inited = true;
+    ESP_LOGI(TAG, "tester: initialized (max %d consumers)", BROKER_TESTER_MAX_CONSUMERS);
+    return true;
+}
+
+int broker_tester_register(void *stream_buffer_handle)
+{
+    if (!s_tester_inited || !stream_buffer_handle) return -1;
+    int slot = -1;
+    portENTER_CRITICAL(&s_tester_mux);
+    for (int i = 0; i < BROKER_TESTER_MAX_CONSUMERS; i++) {
+        if (!s_tester_consumers[i].active) {
+            s_tester_consumers[i].sb = stream_buffer_handle;
+            s_tester_consumers[i].active = true;
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= 0) s_tester_stats.consumers++;
+    portEXIT_CRITICAL(&s_tester_mux);
+    if (slot >= 0) {
+        ESP_LOGI(TAG, "tester: consumer registered (slot %d)", slot);
+    }
+    return slot;
+}
+
+void broker_tester_unregister(int slot)
+{
+    if (slot < 0 || slot >= BROKER_TESTER_MAX_CONSUMERS) return;
+    portENTER_CRITICAL(&s_tester_mux);
+    if (s_tester_consumers[slot].active) {
+        s_tester_consumers[slot].active = false;
+        s_tester_consumers[slot].sb = NULL;
+        if (s_tester_stats.consumers > 0) s_tester_stats.consumers--;
+    }
+    portEXIT_CRITICAL(&s_tester_mux);
+    ESP_LOGI(TAG, "tester: consumer unregistered (slot %d)", slot);
+}
+
+int broker_tester_consumer_count(void)
+{
+    int n = 0;
+    portENTER_CRITICAL(&s_tester_mux);
+    for (int i = 0; i < BROKER_TESTER_MAX_CONSUMERS; i++) {
+        if (s_tester_consumers[i].active) n++;
+    }
+    portEXIT_CRITICAL(&s_tester_mux);
+    return n;
+}
+
+bool broker_tester_request_publish(const char *topic, size_t topic_len,
+                                   const uint8_t *payload, size_t payload_len,
+                                   bool retain)
+{
+    if (!s_tester_inited || !s_tester_pub_q) return false;
+    if (!topic || topic_len == 0 || topic_len > BROKER_TESTER_MAX_TOPIC_LEN) return false;
+    if (payload_len > BROKER_TESTER_MAX_PAYLOAD_LEN) return false;
+    if (payload_len > 0 && !payload) return false;
+    /* Reject wildcards and embedded NULs in publish topics (MQTT 3.1.1 §3.3.2.1). */
+    for (size_t i = 0; i < topic_len; i++) {
+        char c = topic[i];
+        if (c == '#' || c == '+' || c == '\0') return false;
+    }
+
+    tester_pub_req_t req;
+    memset(&req, 0, sizeof(req));
+    memcpy(req.topic, topic, topic_len);
+    req.topic[topic_len] = '\0';
+    req.topic_len = (uint16_t)topic_len;
+    if (payload_len > 0) memcpy(req.payload, payload, payload_len);
+    req.payload_len = (uint16_t)payload_len;
+    req.retain = retain;
+
+    if (xQueueSend(s_tester_pub_q, &req, 0) != pdTRUE) {
+        portENTER_CRITICAL(&s_tester_mux);
+        s_tester_stats.publish_rejected++;
+        portEXIT_CRITICAL(&s_tester_mux);
+        return false;
+    }
+    return true;
+}
+
+void broker_tester_get_stats(broker_tester_stats_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&s_tester_mux);
+    *out = s_tester_stats;
+    portEXIT_CRITICAL(&s_tester_mux);
+}
+
+/* Called from broker_task ONLY, after a successful PUBLISH fanout.
+ * Builds one event and tries to enqueue it into every active consumer's
+ * stream buffer with zero timeout. Drops are counted, not retried. */
+static void tester_fanout(const char *topic, uint16_t topic_len,
+                          const uint8_t *payload, uint32_t payload_len,
+                          bool retain)
+{
+    if (!s_tester_inited) return;
+
+    /* Fast exit if no consumers (cheap, taken from outside critical section). */
+    bool any = false;
+    for (int i = 0; i < BROKER_TESTER_MAX_CONSUMERS; i++) {
+        if (s_tester_consumers[i].active) { any = true; break; }
+    }
+    if (!any) return;
+
+    broker_tester_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    uint16_t tl = topic_len;
+    if (tl > BROKER_TESTER_MAX_TOPIC_LEN) tl = BROKER_TESTER_MAX_TOPIC_LEN;
+    memcpy(ev.topic, topic, tl);
+    ev.topic[tl] = '\0';
+    ev.topic_len = tl;
+
+    uint32_t pl = payload_len;
+    if (pl > BROKER_TESTER_MAX_PAYLOAD_LEN) {
+        pl = BROKER_TESTER_MAX_PAYLOAD_LEN;
+        ev.truncated = 1;
+    }
+    if (pl > 0) memcpy(ev.payload, payload, pl);
+    ev.payload_len = (uint16_t)pl;
+    ev.retain = retain ? 1 : 0;
+    ev.seq = ++s_tester_seq;
+
+    /* Snapshot consumer handles inside critical section to avoid races with
+     * unregister(); send outside the critical section. */
+    void *handles[BROKER_TESTER_MAX_CONSUMERS] = {0};
+    int n = 0;
+    portENTER_CRITICAL(&s_tester_mux);
+    s_tester_stats.events_published++;
+    for (int i = 0; i < BROKER_TESTER_MAX_CONSUMERS; i++) {
+        if (s_tester_consumers[i].active) handles[n++] = s_tester_consumers[i].sb;
+    }
+    portEXIT_CRITICAL(&s_tester_mux);
+
+    for (int i = 0; i < n; i++) {
+        StreamBufferHandle_t sb = (StreamBufferHandle_t)handles[i];
+        if (!sb) continue;
+        size_t sent = xStreamBufferSend(sb, &ev, sizeof(ev), 0);
+        if (sent != sizeof(ev)) {
+            portENTER_CRITICAL(&s_tester_mux);
+            s_tester_stats.events_dropped++;
+            portEXIT_CRITICAL(&s_tester_mux);
+        }
+    }
+}
+
+/* Forward declaration for use inside broker_task. */
+static void handle_publish_internal(const char *topic, uint16_t topic_len,
+                                    const uint8_t *payload, uint32_t payload_len,
+                                    bool retain);
+
+/* Called from broker_task to drain queued publish requests from WS tasks. */
+static void tester_drain_publish_queue(void)
+{
+    if (!s_tester_pub_q) return;
+    tester_pub_req_t req;
+    /* Bounded drain: at most 8 per loop iteration so we never starve real clients. */
+    for (int i = 0; i < 8; i++) {
+        if (xQueueReceive(s_tester_pub_q, &req, 0) != pdTRUE) break;
+        portENTER_CRITICAL(&s_tester_mux);
+        s_tester_stats.publish_requests++;
+        portEXIT_CRITICAL(&s_tester_mux);
+        handle_publish_internal(req.topic, req.topic_len,
+                                req.payload, req.payload_len, req.retain);
+    }
+}
+
+#endif /* BROKER_TESTER_ENABLED */
 
 /* ---- Helpers ---- */
 
@@ -582,6 +798,48 @@ static void handle_unsubscribe(int idx, const uint8_t *pkt, size_t pkt_len)
     s_clients[idx].last_activity = get_time_ms();
 }
 
+/* Internal: fanout a publish that has already been parsed/validated.
+ * Called by handle_publish (from real TCP clients) and by the tester drain
+ * path (from web UI). Runs on broker_task only. */
+static void handle_publish_internal(const char *topic, uint16_t topic_len,
+                                    const uint8_t *payload, uint32_t payload_len,
+                                    bool retain)
+{
+    /* Store/update/delete retained message if retain flag is set */
+    if (retain && s_retain_enabled) {
+        retain_store(topic, topic_len, payload, payload_len);
+    }
+
+    /* Build the outgoing PUBLISH packet once */
+    int out_len = mqtt_build_publish(s_send_buf, s_buf_size,
+                                     topic, topic_len,
+                                     payload, payload_len,
+                                     false);  /* don't retain on forward */
+    if (out_len < 0) {
+        ESP_LOGW(TAG, "PUBLISH too large to forward (%lu bytes)",
+                 (unsigned long)payload_len);
+        return;
+    }
+
+    /* Route to all matching subscribers */
+    for (int i = 0; i < BROKER_MAX_SUBSCRIPTIONS; i++) {
+        if (!s_subs[i].active) continue;
+        if (!mqtt_topic_matches(s_subs[i].topic, s_subs[i].topic_len,
+                                topic, topic_len)) continue;
+
+        int ci = s_subs[i].client_idx;
+        if (s_clients[ci].fd >= 0 && s_clients[ci].connected) {
+            client_send(ci, s_send_buf, out_len);
+        }
+    }
+
+#if BROKER_TESTER_ENABLED
+    /* After-fanout hook: deliver to tester consumers. Non-blocking, never
+     * fails in a way that affects real-client delivery. */
+    tester_fanout(topic, topic_len, payload, payload_len, retain);
+#endif
+}
+
 static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)
 {
     broker_client_t *c = &s_clients[idx];
@@ -609,36 +867,8 @@ static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)
     ESP_LOGD(TAG, "PUB '%s' (%lu bytes) from client %d",
              pub.topic, (unsigned long)pub.payload_len, idx);
 
-    /* Store/update/delete retained message if retain flag is set */
-    if (pub.retain && s_retain_enabled) {
-        retain_store(pub.topic, pub.topic_len, pub.payload, pub.payload_len);
-    }
-
-    /* Build the outgoing PUBLISH packet once */
-    int out_len = mqtt_build_publish(s_send_buf, s_buf_size,
-                                     pub.topic, pub.topic_len,
-                                     pub.payload, pub.payload_len,
-                                     false);  /* don't retain on forward */
-    if (out_len < 0) {
-        ESP_LOGW(TAG, "PUBLISH too large to forward (%lu bytes)",
-                 (unsigned long)pub.payload_len);
-        return;
-    }
-
-    /* Route to all matching subscribers */
-    for (int i = 0; i < BROKER_MAX_SUBSCRIPTIONS; i++) {
-        if (!s_subs[i].active) continue;
-        if (!mqtt_topic_matches(s_subs[i].topic, s_subs[i].topic_len,
-                                pub.topic, pub.topic_len)) continue;
-
-        int ci = s_subs[i].client_idx;
-        /* Don't echo back to sender (optional — some brokers do echo) */
-        /* if (ci == idx) continue; */
-
-        if (s_clients[ci].fd >= 0 && s_clients[ci].connected) {
-            client_send(ci, s_send_buf, out_len);
-        }
-    }
+    handle_publish_internal(pub.topic, pub.topic_len,
+                            pub.payload, pub.payload_len, pub.retain);
 
     s_clients[idx].last_activity = get_time_ms();
 }
@@ -856,6 +1086,13 @@ static void broker_task(void *arg)
     ESP_LOGI(TAG, "MQTT broker listening on port %d (max %d clients, %d subs)",
              BROKER_PORT, BROKER_MAX_CLIENTS, BROKER_MAX_SUBSCRIPTIONS);
 
+#if BROKER_TESTER_ENABLED
+    /* Init tester subsystem. Failure is non-fatal: broker continues without it. */
+    if (!broker_tester_init()) {
+        ESP_LOGW(TAG, "tester init failed; broker continues without web UI tester");
+    }
+#endif
+
     int64_t last_keepalive_check = get_time_ms();
     int64_t last_stats = get_time_ms();
 
@@ -886,6 +1123,12 @@ static void broker_task(void *arg)
             /* select() corrupted read_fds — rebuild it */
             continue;
         }
+
+#if BROKER_TESTER_ENABLED
+        /* Drain any publish requests from web UI tester before serving sockets.
+         * Internally bounded so it cannot starve real clients. */
+        tester_drain_publish_queue();
+#endif
 
         /* Accept new connections */
         if (ready > 0 && FD_ISSET(s_server_fd, &read_fds)) {

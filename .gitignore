@@ -19,6 +19,9 @@ __pycache__/
 # Captured MQTT traffic (contains sensitive device/network info)
 captured_mqtt*.json
 
+# Release binaries (rebuildable; kept on disk as rollback artifacts, not in git)
+releases/
+
 # Editor/IDE
 .vscode/
 .idea/

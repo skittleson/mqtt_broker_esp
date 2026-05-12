@@ -8,6 +8,18 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+
+/* ---- Tester (web UI MQTT topic tester) feature flag ----
+ * When 1, the broker maintains a small registry of in-process "tester"
+ * consumers (the web UI WebSocket clients) that receive every accepted
+ * PUBLISH after normal fanout, and accepts publish requests from those
+ * consumers via a thread-safe queue drained by broker_task. When 0, all
+ * tester code is compiled out and the broker behaves exactly as before.
+ */
+#ifndef BROKER_TESTER_ENABLED
+#define BROKER_TESTER_ENABLED 1
+#endif
 
 /* ---- Configuration ---- */
 #define BROKER_MAX_CLIENTS          100
@@ -83,5 +95,74 @@ typedef struct {
  * @return           number of connected clients written to out
  */
 int broker_get_clients(broker_client_info_t *out, int max_out);
+
+#if BROKER_TESTER_ENABLED
+
+/* ---- Tester API (consumed by portal_ws.c) ----
+ *
+ * Threading model:
+ *   - All broker state (clients, subs, retained store) is owned by broker_task.
+ *   - Tester consumers live in portal-side WS tasks.
+ *   - The broker exposes ONE thread-safe FreeRTOS queue for publish requests
+ *     from WS tasks -> broker_task (drained at the top of the select loop).
+ *   - Each WS task creates its OWN FreeRTOS StreamBuffer and registers it
+ *     with the broker. After a successful PUBLISH fanout, broker_task does
+ *     a non-blocking xStreamBufferSend to each registered buffer. Full
+ *     buffers drop messages (counted in tester stats); they never block
+ *     the broker.
+ */
+
+/* Hard caps for tester. Keep small to bound RAM and risk. */
+#define BROKER_TESTER_MAX_CONSUMERS    2
+#define BROKER_TESTER_MAX_TOPIC_LEN    128
+#define BROKER_TESTER_MAX_PAYLOAD_LEN  256
+
+/* Wire format for messages handed from broker -> WS consumer via stream buffer.
+ * Stored back-to-back, each preceded by its length (handled by StreamBuffer
+ * trigger-level semantics). */
+typedef struct {
+    uint32_t seq;                 /* monotonically increasing per-broker */
+    uint16_t topic_len;
+    uint16_t payload_len;
+    uint8_t  retain;              /* 0 or 1 */
+    uint8_t  truncated;           /* payload was truncated to fit */
+    char     topic[BROKER_TESTER_MAX_TOPIC_LEN + 1];
+    uint8_t  payload[BROKER_TESTER_MAX_PAYLOAD_LEN];
+} broker_tester_event_t;
+
+/* Stats accessible to the portal for UI/debug. */
+typedef struct {
+    uint32_t consumers;
+    uint32_t events_published;     /* total events handed to fanout */
+    uint32_t events_dropped;       /* stream buffer was full */
+    uint32_t publish_requests;     /* publishes from UI accepted */
+    uint32_t publish_rejected;     /* malformed / over-limit */
+} broker_tester_stats_t;
+
+/* Initialize tester subsystem. Idempotent. Safe to call before broker_start().
+ * Returns true on success. On failure, broker continues without tester. */
+bool broker_tester_init(void);
+
+/* Register a consumer's stream buffer. Returns slot index >=0 or -1 if full.
+ * The caller (WS task) owns the StreamBufferHandle_t and must call
+ * broker_tester_unregister() before deleting it. */
+int broker_tester_register(void *stream_buffer_handle);
+
+/* Unregister by slot index returned from broker_tester_register(). */
+void broker_tester_unregister(int slot);
+
+/* Number of currently-registered consumers (for /ws 503 gating). */
+int broker_tester_consumer_count(void);
+
+/* Submit a publish request from a WS task. Topic/payload are copied into the
+ * queue item. Returns true if queued. Non-blocking; returns false if queue
+ * is full or args invalid. The broker enforces wildcard/length rules. */
+bool broker_tester_request_publish(const char *topic, size_t topic_len,
+                                   const uint8_t *payload, size_t payload_len,
+                                   bool retain);
+
+void broker_tester_get_stats(broker_tester_stats_t *out);
+
+#endif /* BROKER_TESTER_ENABLED */
 
 #endif /* MQTT_BROKER_H */
