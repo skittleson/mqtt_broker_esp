@@ -199,7 +199,17 @@ void app_main(void)
 #ifdef CONFIG_MQTT_BROKER_ETHERNET
     ESP_LOGI(TAG, "Initializing Ethernet (W5500 SPI)...");
     if (eth_init() == ESP_OK) {
-        /* Check NVS for saved NAPT state (default: enabled) */
+        /* Ethernet is up — prefer it as the LAN uplink. Drop the WiFi STA
+         * so we don't hold a second DHCP lease on the same router. The AP
+         * stays up so the captive portal remains reachable. */
+        if (wifi_get_sta_connected()) {
+            ESP_LOGI(TAG, "Ethernet up — disconnecting WiFi STA");
+            wifi_stop_sta();
+        }
+
+        /* With STA gone, NAPT bridging from LAN → AP subnet is the only
+         * way AP clients reach the internet. Check NVS for saved state
+         * (default: enabled). */
         uint8_t napt_en = 1;
         {
             nvs_handle_t h;

@@ -43,6 +43,9 @@ menu "MQTT Broker Configuration"
             help
                 SPI host peripheral. 2 = SPI2_HOST (default), 3 = SPI3_HOST.
 
+        # Defaults below match the Waveshare ESP32-S3-ETH board
+        # (W5500 on SPI2). See https://www.waveshare.com/wiki/ESP32-S3-ETH
+
         config ETH_SPI_MOSI
             int "W5500 MOSI GPIO"
             default 11
@@ -51,31 +54,31 @@ menu "MQTT Broker Configuration"
 
         config ETH_SPI_MISO
             int "W5500 MISO GPIO"
-            default 13
+            default 12
             help
                 GPIO pin connected to W5500 MISO.
 
         config ETH_SPI_SCLK
             int "W5500 SCLK GPIO"
-            default 12
+            default 13
             help
                 GPIO pin connected to W5500 SCLK.
 
         config ETH_SPI_CS
             int "W5500 CS GPIO"
-            default 10
+            default 14
             help
                 GPIO pin connected to W5500 CS (chip select).
 
         config ETH_SPI_INT
             int "W5500 INT GPIO"
-            default 4
+            default 10
             help
                 GPIO pin connected to W5500 INT (interrupt).
 
         config ETH_SPI_RST
             int "W5500 RST GPIO (-1 for none)"
-            default 5
+            default 9
             range -1 48
             help
                 GPIO pin connected to W5500 hardware reset.
@@ -83,10 +86,12 @@ menu "MQTT Broker Configuration"
 
         config ETH_SPI_CLOCK_MHZ
             int "SPI clock speed (MHz)"
-            default 33
+            default 25
             range 1 40
             help
-                SPI clock speed in MHz. W5500 supports up to 33 MHz.
+                SPI clock speed in MHz. W5500 supports up to 33 MHz;
+                25 MHz is a safe default that matches Waveshare's
+                ESPHome reference config.
 
     endif # MQTT_BROKER_ETHERNET
 

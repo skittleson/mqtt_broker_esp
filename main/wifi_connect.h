@@ -56,6 +56,14 @@ void wifi_start_apsta(void);
 void wifi_stop_ap(void);
 
 /**
+ * Disconnect STA and switch WiFi to AP-only mode.
+ * Use when an alternate uplink (e.g. Ethernet) is active and you don't
+ * want the device to also occupy a DHCP lease on the same LAN via WiFi.
+ * Keeps the AP up so the captive portal remains reachable.
+ */
+void wifi_stop_sta(void);
+
+/**
  * Check if STA is currently connected to an AP.
  * @return 1 if connected, 0 if not
  */

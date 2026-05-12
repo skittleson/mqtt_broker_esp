@@ -25,6 +25,7 @@
 #include "esp_eth_mac_spi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "esp_mac.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 
@@ -38,6 +39,16 @@ static esp_eth_handle_t s_eth_handle = NULL;
 static EventGroupHandle_t s_eth_event_group = NULL;
 static volatile int s_eth_connected = 0;
 static volatile int s_napt_enabled = 0;
+static volatile int s_eth_link_up = 0;
+static const char *s_eth_stage = "disabled";
+static char s_eth_last_error[96] = "";
+
+static void eth_set_error(const char *where, esp_err_t err)
+{
+    snprintf(s_eth_last_error, sizeof(s_eth_last_error), "%s: %s",
+             where, esp_err_to_name(err));
+    ESP_LOGE(TAG, "%s", s_eth_last_error);
+}
 
 /* ---- Event handlers ---- */
 
@@ -47,17 +58,24 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     switch (event_id) {
         case ETHERNET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Ethernet link up");
+            s_eth_link_up = 1;
+            s_eth_stage = "link-up";
             break;
         case ETHERNET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "Ethernet link down");
+            s_eth_link_up = 0;
             s_eth_connected = 0;
+            s_eth_stage = "link-down";
             break;
         case ETHERNET_EVENT_START:
             ESP_LOGI(TAG, "Ethernet started");
+            s_eth_stage = "started";
             break;
         case ETHERNET_EVENT_STOP:
             ESP_LOGI(TAG, "Ethernet stopped");
+            s_eth_link_up = 0;
             s_eth_connected = 0;
+            s_eth_stage = "stopped";
             break;
         default:
             break;
@@ -70,6 +88,7 @@ static void eth_got_ip_handler(void *arg, esp_event_base_t event_base,
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(TAG, "Ethernet got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     s_eth_connected = 1;
+    s_eth_stage = "got-ip";
     if (s_eth_event_group) {
         xEventGroupSetBits(s_eth_event_group, ETH_GOT_IP_BIT);
     }
@@ -80,6 +99,13 @@ static void eth_got_ip_handler(void *arg, esp_event_base_t event_base,
 esp_err_t eth_init(void)
 {
     esp_err_t ret;
+
+    s_eth_stage = "init";
+    s_eth_last_error[0] = '\0';
+    ESP_LOGI(TAG, "W5500 pins: MOSI=%d MISO=%d SCLK=%d CS=%d INT=%d RST=%d (SPI%d @ %d MHz)",
+             CONFIG_ETH_SPI_MOSI, CONFIG_ETH_SPI_MISO, CONFIG_ETH_SPI_SCLK,
+             CONFIG_ETH_SPI_CS, CONFIG_ETH_SPI_INT, CONFIG_ETH_SPI_RST,
+             CONFIG_ETH_SPI_HOST, CONFIG_ETH_SPI_CLOCK_MHZ);
 
     s_eth_event_group = xEventGroupCreate();
     if (!s_eth_event_group) {
@@ -101,7 +127,7 @@ esp_err_t eth_init(void)
 
     ret = spi_bus_initialize(CONFIG_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+        eth_set_error("spi_bus_initialize", ret);
         vEventGroupDelete(s_eth_event_group);
         s_eth_event_group = NULL;
         return ret;
@@ -125,7 +151,9 @@ esp_err_t eth_init(void)
 
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
     if (!mac) {
-        ESP_LOGE(TAG, "Failed to create W5500 MAC");
+        snprintf(s_eth_last_error, sizeof(s_eth_last_error),
+                 "esp_eth_mac_new_w5500 returned NULL");
+        ESP_LOGE(TAG, "%s", s_eth_last_error);
         spi_bus_free(CONFIG_ETH_SPI_HOST);
         vEventGroupDelete(s_eth_event_group);
         s_eth_event_group = NULL;
@@ -151,7 +179,8 @@ esp_err_t eth_init(void)
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
     ret = esp_eth_driver_install(&eth_config, &s_eth_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Ethernet driver install failed: %s", esp_err_to_name(ret));
+        eth_set_error("esp_eth_driver_install", ret);
+        /* fallthrough — cleanup handled below */
         phy->del(phy);
         mac->del(mac);
         spi_bus_free(CONFIG_ETH_SPI_HOST);
@@ -173,6 +202,36 @@ esp_err_t eth_init(void)
         vEventGroupDelete(s_eth_event_group);
         s_eth_event_group = NULL;
         return ESP_FAIL;
+    }
+
+    /* W5500 has no factory MAC — must program one or DHCP will be silently
+     * dropped by every router. Derive a locally-administered unicast MAC
+     * from the chip's eFuse base MAC so it's stable across reboots and
+     * different from the WiFi STA/AP MACs. */
+    {
+        uint8_t eth_mac[6] = {0};
+        esp_err_t mret = esp_read_mac(eth_mac, ESP_MAC_ETH);
+        if (mret != ESP_OK) {
+            /* Fall back to base MAC + locally-administered bit */
+            mret = esp_efuse_mac_get_default(eth_mac);
+            if (mret == ESP_OK) {
+                eth_mac[0] |= 0x02;       /* locally administered */
+                eth_mac[0] &= 0xFE;       /* unicast */
+                eth_mac[5] = (uint8_t)(eth_mac[5] + 3); /* offset from WiFi */
+            }
+        }
+        if (mret == ESP_OK) {
+            esp_err_t ioret = esp_eth_ioctl(s_eth_handle, ETH_CMD_S_MAC_ADDR, eth_mac);
+            if (ioret == ESP_OK) {
+                ESP_LOGI(TAG, "W5500 MAC set: %02x:%02x:%02x:%02x:%02x:%02x",
+                         eth_mac[0], eth_mac[1], eth_mac[2],
+                         eth_mac[3], eth_mac[4], eth_mac[5]);
+            } else {
+                ESP_LOGW(TAG, "ETH_CMD_S_MAC_ADDR failed: %s", esp_err_to_name(ioret));
+            }
+        } else {
+            ESP_LOGW(TAG, "Could not derive ETH MAC: %s", esp_err_to_name(mret));
+        }
     }
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
@@ -209,7 +268,7 @@ esp_err_t eth_init(void)
     /* Start Ethernet */
     ret = esp_eth_start(s_eth_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Ethernet start failed: %s", esp_err_to_name(ret));
+        eth_set_error("esp_eth_start", ret);
         return ret;
     }
 
@@ -225,8 +284,14 @@ esp_err_t eth_init(void)
     s_eth_event_group = NULL;
 
     if (!(bits & ETH_GOT_IP_BIT)) {
-        ESP_LOGW(TAG, "Ethernet DHCP timeout (%ds) — no IP acquired",
-                 ETH_TIMEOUT_MS / 1000);
+        if (s_eth_link_up) {
+            snprintf(s_eth_last_error, sizeof(s_eth_last_error),
+                     "DHCP timeout (%ds) after link-up", ETH_TIMEOUT_MS / 1000);
+        } else {
+            snprintf(s_eth_last_error, sizeof(s_eth_last_error),
+                     "no link after %ds (cable/PHY?)", ETH_TIMEOUT_MS / 1000);
+        }
+        ESP_LOGW(TAG, "%s", s_eth_last_error);
         return ESP_FAIL;
     }
 
@@ -296,6 +361,21 @@ int eth_napt_disable(void)
 int eth_napt_is_enabled(void)
 {
     return s_napt_enabled;
+}
+
+int eth_is_link_up(void)
+{
+    return s_eth_link_up;
+}
+
+const char *eth_get_stage(void)
+{
+    return s_eth_stage ? s_eth_stage : "unknown";
+}
+
+const char *eth_get_last_error(void)
+{
+    return s_eth_last_error;
 }
 
 #endif /* CONFIG_MQTT_BROKER_ETHERNET */

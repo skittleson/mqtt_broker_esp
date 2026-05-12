@@ -1662,10 +1662,27 @@ static void handle_http_client(int client_fd)
             char eth_ip[16] = "";
             int eth_up = eth_is_connected();
             if (eth_up) eth_get_ip_str(eth_ip, sizeof(eth_ip));
+            /* Escape last-error string minimally (quotes → ') */
+            char err_esc[96];
+            const char *src = eth_get_last_error();
+            size_t ei = 0;
+            for (size_t si = 0; src[si] && ei < sizeof(err_esc) - 1; si++) {
+                char c = src[si];
+                err_esc[ei++] = (c == '"' || c == '\\') ? '\'' : c;
+            }
+            err_esc[ei] = '\0';
             len += snprintf(json + len, PAGE_BUF_SIZE - len,
-                ",\"ethernet\":{\"connected\":%s,\"ip\":\"%s\",\"napt\":%s}",
+                ",\"ethernet\":{\"connected\":%s,\"ip\":\"%s\",\"napt\":%s,"
+                "\"link\":%s,\"stage\":\"%s\",\"last_error\":\"%s\","
+                "\"pins\":{\"mosi\":%d,\"miso\":%d,\"sclk\":%d,"
+                "\"cs\":%d,\"int\":%d,\"rst\":%d,\"clock_mhz\":%d}}",
                 eth_up ? "true" : "false", eth_ip,
-                eth_napt_is_enabled() ? "true" : "false");
+                eth_napt_is_enabled() ? "true" : "false",
+                eth_is_link_up() ? "true" : "false",
+                eth_get_stage(), err_esc,
+                CONFIG_ETH_SPI_MOSI, CONFIG_ETH_SPI_MISO, CONFIG_ETH_SPI_SCLK,
+                CONFIG_ETH_SPI_CS, CONFIG_ETH_SPI_INT, CONFIG_ETH_SPI_RST,
+                CONFIG_ETH_SPI_CLOCK_MHZ);
         }
 #endif
         len += snprintf(json + len, PAGE_BUF_SIZE - len, "}");

@@ -73,5 +73,25 @@ int eth_napt_disable(void);
  */
 int eth_napt_is_enabled(void);
 
+/**
+ * Return 1 if the W5500 PHY currently reports link-up, 0 otherwise.
+ * Useful for distinguishing "no cable / no link" from "link up but no DHCP".
+ */
+int eth_is_link_up(void);
+
+/**
+ * Return a short human-readable status string describing the current
+ * Ethernet state machine stage. Always non-NULL.
+ *
+ * One of: "disabled", "init-fail", "started", "link-up", "got-ip",
+ *        "link-down", "stopped".
+ */
+const char *eth_get_stage(void);
+
+/**
+ * Return a short human-readable last-error string, or "" if no error.
+ */
+const char *eth_get_last_error(void);
+
 #endif /* CONFIG_MQTT_BROKER_ETHERNET */
 #endif /* ETH_CONNECT_H */

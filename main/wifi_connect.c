@@ -429,6 +429,28 @@ void wifi_stop_ap(void)
     esp_wifi_start();
 }
 
+void wifi_stop_sta(void)
+{
+    /* Disconnect from the upstream AP so we release the DHCP lease. */
+    esp_err_t derr = esp_wifi_disconnect();
+    if (derr != ESP_OK && derr != ESP_ERR_WIFI_NOT_STARTED) {
+        ESP_LOGW(TAG, "esp_wifi_disconnect: %s", esp_err_to_name(derr));
+    }
+
+    /* Keep AP up if it was running; otherwise turn WiFi off entirely
+     * is too aggressive — leave the radio in AP mode so the portal works. */
+    if (s_wifi_mode == WIFI_MODE_APSTA || s_wifi_mode == WIFI_MODE_AP) {
+        s_wifi_mode = WIFI_MODE_AP;
+        esp_wifi_set_mode(WIFI_MODE_AP);
+        ESP_LOGI(TAG, "STA disconnected; WiFi now AP-only");
+    } else {
+        /* No AP active — drop STA entirely. */
+        s_wifi_mode = WIFI_MODE_NULL;
+        esp_wifi_set_mode(WIFI_MODE_NULL);
+        ESP_LOGI(TAG, "STA disconnected; WiFi radio idle");
+    }
+}
+
 int wifi_get_sta_connected(void)
 {
     wifi_ap_record_t ap = {0};
