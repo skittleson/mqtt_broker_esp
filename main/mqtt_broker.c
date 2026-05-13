@@ -7,9 +7,13 @@
  * Supports:
  *   - 100 concurrent clients
  *   - 2048 total subscriptions (255+ unique topics)
- *   - QoS 0 outbound; QoS 0 + QoS 1 inbound (QoS 1 publishes are PUBACK'd
- *     to the publisher and fanned out at QoS 0 — a spec-compliant downgrade).
- *     QoS 2 not yet supported (publishes silently dropped, publisher retries).
+ *   - QoS 0 and QoS 1 in both directions:
+ *       • Inbound QoS 1 PUBLISH → broker sends PUBACK after fanout.
+ *       • Outbound QoS 1 PUBLISH (to subscribers that granted QoS 1):
+ *         tracked in per-client in-flight tables, retried with DUP=1 on
+ *         PUBACK timeout (15s, exponential backoff to 60s, 5 retries max).
+ *       • SUBACK grants min(requested, 1).
+ *     QoS 2 not yet supported (inbound dropped, outbound never selected).
  *   - Wildcard topic matching (+ and #)
  *   - Keep-alive enforcement
  *   - Retained messages (1-week TTL, memory-capped)
@@ -52,9 +56,28 @@ typedef struct {
     int64_t  last_activity;                     /* timestamp of last packet (ms) */
     int64_t  connected_at;                      /* timestamp when CONNECT accepted (ms) */
     uint32_t published;                         /* count of accepted PUBLISH packets from this client */
+    uint16_t next_packet_id;                    /* outbound QoS-1 packet id source */
     bool     connected;                         /* CONNECT received and accepted */
     bool     authenticated;                     /* credentials validated */
 } broker_client_t;
+
+/* ---- Outbound QoS 1 in-flight slot ----
+ * One per pending QoS 1 PUBLISH (broker → subscriber). Slots are owned
+ * per-client; the topic + payload buffers are PSRAM heap allocations that
+ * must be freed via inflight_free_slot() when the message is PUBACK'd,
+ * abandoned, or the client disconnects.
+ */
+typedef struct {
+    bool      active;
+    uint8_t   retries;          /* 0 = original send, 1..N = retransmissions */
+    bool      retain;           /* retain bit to set on resend */
+    uint16_t  packet_id;        /* MQTT packet identifier (non-zero) */
+    int64_t   next_retry_ms;    /* absolute deadline for the next retry */
+    uint16_t  topic_len;
+    uint32_t  payload_len;
+    char     *topic;            /* PSRAM heap */
+    uint8_t  *payload;          /* PSRAM heap */
+} broker_inflight_t;
 
 /* ---- Subscription State ---- */
 
@@ -95,6 +118,14 @@ static broker_sub_t     *s_subs = NULL;
 static uint8_t          *s_send_buf = NULL;
 static int              s_server_fd = -1;
 static int              s_num_connected = 0;
+
+/* Outbound QoS-1 in-flight tables. Indexed [client_idx][slot]. Allocated
+ * from PSRAM in broker_task() once at startup; per-message topic+payload
+ * buffers are allocated/freed on demand. */
+static broker_inflight_t (*s_inflight)[BROKER_INFLIGHT_PER_CLIENT_MAX] = NULL;
+static size_t            s_inflight_bytes = 0;  /* running total of topic+payload bytes */
+static uint32_t          s_inflight_dropped = 0; /* abandoned-after-max-retries counter */
+static uint32_t          s_inflight_cap_skips = 0; /* QoS 1 downgrades due to mem cap */
 
 #if BROKER_TESTER_ENABLED
 
@@ -287,10 +318,12 @@ static void tester_fanout(const char *topic, uint16_t topic_len,
     }
 }
 
-/* Forward declaration for use inside broker_task. */
+/* Forward declaration for use inside broker_task. pub_qos is the QoS of
+ * the originating PUBLISH (0 or 1); per-subscriber delivery QoS is capped
+ * to min(pub_qos, granted) inside handle_publish_internal. */
 static void handle_publish_internal(const char *topic, uint16_t topic_len,
                                     const uint8_t *payload, uint32_t payload_len,
-                                    bool retain);
+                                    bool retain, uint8_t pub_qos);
 
 /* Called from broker_task to drain queued publish requests from WS tasks. */
 static void tester_drain_publish_queue(void)
@@ -304,7 +337,8 @@ static void tester_drain_publish_queue(void)
         s_tester_stats.publish_requests++;
         portEXIT_CRITICAL(&s_tester_mux);
         handle_publish_internal(req.topic, req.topic_len,
-                                req.payload, req.payload_len, req.retain);
+                                req.payload, req.payload_len, req.retain,
+                                /*pub_qos=*/0);
     }
 }
 
@@ -332,6 +366,79 @@ static int find_free_client(void)
     return -1;
 }
 
+/* ---- Outbound QoS-1 in-flight management ---- */
+
+static void inflight_free_slot(int client_idx, int slot)
+{
+    if (!s_inflight) return;
+    broker_inflight_t *e = &s_inflight[client_idx][slot];
+    if (!e->active) return;
+
+    size_t bytes = (size_t)e->topic_len + e->payload_len;
+    if (s_inflight_bytes >= bytes) {
+        s_inflight_bytes -= bytes;
+    } else {
+        s_inflight_bytes = 0;
+    }
+    free(e->topic);
+    free(e->payload);
+    e->topic = NULL;
+    e->payload = NULL;
+    e->active = false;
+}
+
+static void inflight_free_all_for_client(int client_idx)
+{
+    if (!s_inflight) return;
+    for (int s = 0; s < BROKER_INFLIGHT_PER_CLIENT_MAX; s++) {
+        if (s_inflight[client_idx][s].active) {
+            inflight_free_slot(client_idx, s);
+        }
+    }
+}
+
+static int inflight_find_free_slot(int client_idx)
+{
+    if (!s_inflight) return -1;
+    for (int s = 0; s < BROKER_INFLIGHT_PER_CLIENT_MAX; s++) {
+        if (!s_inflight[client_idx][s].active) return s;
+    }
+    return -1;
+}
+
+static int inflight_count_for_client(int client_idx)
+{
+    if (!s_inflight) return 0;
+    int n = 0;
+    for (int s = 0; s < BROKER_INFLIGHT_PER_CLIENT_MAX; s++) {
+        if (s_inflight[client_idx][s].active) n++;
+    }
+    return n;
+}
+
+/* Generate the next QoS-1 packet id for a client, skipping 0 and any value
+ * currently held in this client's in-flight table. Returns 0 if no free id
+ * could be found (effectively impossible while the per-client slot cap is
+ * far below 65535). */
+static uint16_t inflight_next_packet_id(int client_idx)
+{
+    broker_client_t *c = &s_clients[client_idx];
+    for (int attempt = 0; attempt < 65535; attempt++) {
+        c->next_packet_id++;
+        if (c->next_packet_id == 0) c->next_packet_id = 1;
+        bool collision = false;
+        for (int s = 0; s < BROKER_INFLIGHT_PER_CLIENT_MAX; s++) {
+            if (s_inflight[client_idx][s].active &&
+                s_inflight[client_idx][s].packet_id == c->next_packet_id) {
+                collision = true;
+                break;
+            }
+        }
+        if (!collision) return c->next_packet_id;
+    }
+    return 0;
+}
+
 static void client_disconnect(int idx)
 {
     broker_client_t *c = &s_clients[idx];
@@ -342,6 +449,11 @@ static void client_disconnect(int idx)
         s_num_connected--;
     }
 
+    /* Free any outbound QoS-1 in-flight messages we were tracking for this
+     * client. Without persistent sessions (clean=0) there is nowhere to put
+     * them; phase 4 will queue these for resumed sessions. */
+    inflight_free_all_for_client(idx);
+
     close(c->fd);
     c->fd = -1;
     c->connected = false;
@@ -349,6 +461,7 @@ static void client_disconnect(int idx)
     c->recv_len = 0;
     c->client_id[0] = '\0';
     c->published = 0;
+    c->next_packet_id = 0;
 
     /* Remove all subscriptions for this client */
     for (int i = 0; i < BROKER_MAX_SUBSCRIPTIONS; i++) {
@@ -722,6 +835,12 @@ static void handle_subscribe(int idx, const uint8_t *pkt, size_t pkt_len)
     uint8_t return_codes[MQTT_MAX_SUBS_PER_PKT];
 
     for (int i = 0; i < sub_pkt.count; i++) {
+        /* Grant min(requested, 1). QoS 2 not yet supported — downgrade to 1.
+         * The granted value is what we'll honour on fanout (see
+         * handle_publish_internal). [MQTT-3.8.4-5] */
+        uint8_t granted = sub_pkt.topics[i].qos;
+        if (granted > 1) granted = 1;
+
         /* Check if this client already has this subscription */
         bool found = false;
         for (int j = 0; j < BROKER_MAX_SUBSCRIPTIONS; j++) {
@@ -729,8 +848,8 @@ static void handle_subscribe(int idx, const uint8_t *pkt, size_t pkt_len)
                 s_subs[j].topic_len == sub_pkt.topics[i].topic_len &&
                 memcmp(s_subs[j].topic, sub_pkt.topics[i].topic,
                        sub_pkt.topics[i].topic_len) == 0) {
-                /* Update QoS */
-                s_subs[j].qos = sub_pkt.topics[i].qos;
+                /* Update granted QoS in place */
+                s_subs[j].qos = granted;
                 found = true;
                 break;
             }
@@ -749,12 +868,12 @@ static void handle_subscribe(int idx, const uint8_t *pkt, size_t pkt_len)
                    sub_pkt.topics[i].topic_len);
             s_subs[slot].topic[sub_pkt.topics[i].topic_len] = '\0';
             s_subs[slot].topic_len = sub_pkt.topics[i].topic_len;
-            s_subs[slot].qos = sub_pkt.topics[i].qos;
+            s_subs[slot].qos = granted;
         }
 
-        /* We only support QoS 0, so always grant QoS 0 */
-        return_codes[i] = SUBACK_QOS0;
-        ESP_LOGD(TAG, "SUB client %d: '%s'", idx, sub_pkt.topics[i].topic);
+        return_codes[i] = granted;  /* SUBACK_QOS0 = 0, SUBACK_QOS1 = 1 */
+        ESP_LOGD(TAG, "SUB client %d: '%s' (req=%u granted=%u)",
+                 idx, sub_pkt.topics[i].topic, sub_pkt.topics[i].qos, granted);
     }
 
     uint8_t buf[128];
@@ -800,40 +919,174 @@ static void handle_unsubscribe(int idx, const uint8_t *pkt, size_t pkt_len)
     s_clients[idx].last_activity = get_time_ms();
 }
 
+/* Allocate a QoS-1 in-flight slot, generate a packet id, copy topic+payload
+ * into PSRAM. Returns slot index >= 0 on success, -1 on failure (table full
+ * or memory cap exceeded). On failure the caller should fall back to QoS 0
+ * delivery for this subscriber. */
+static int inflight_enqueue(int client_idx,
+                            const char *topic, uint16_t topic_len,
+                            const uint8_t *payload, uint32_t payload_len,
+                            bool retain, int64_t now_ms)
+{
+    if (!s_inflight) return -1;
+
+    size_t bytes = (size_t)topic_len + payload_len;
+    if (s_inflight_bytes + bytes > BROKER_INFLIGHT_TOTAL_BYTES_MAX) {
+        s_inflight_cap_skips++;
+        return -1;
+    }
+
+    int slot = inflight_find_free_slot(client_idx);
+    if (slot < 0) return -1;
+
+    uint16_t pkid = inflight_next_packet_id(client_idx);
+    if (pkid == 0) return -1;
+
+    char *t = (char *)heap_caps_malloc(topic_len, MALLOC_CAP_SPIRAM);
+    if (!t) t = (char *)malloc(topic_len);
+    if (!t) return -1;
+    uint8_t *p = NULL;
+    if (payload_len > 0) {
+        p = (uint8_t *)heap_caps_malloc(payload_len, MALLOC_CAP_SPIRAM);
+        if (!p) p = (uint8_t *)malloc(payload_len);
+        if (!p) { free(t); return -1; }
+        memcpy(p, payload, payload_len);
+    }
+    memcpy(t, topic, topic_len);
+
+    broker_inflight_t *e = &s_inflight[client_idx][slot];
+    e->active        = true;
+    e->retries       = 0;
+    e->retain        = retain;
+    e->packet_id     = pkid;
+    e->next_retry_ms = now_ms + BROKER_INFLIGHT_RETRY_INITIAL_MS;
+    e->topic         = t;
+    e->topic_len     = topic_len;
+    e->payload       = p;
+    e->payload_len   = payload_len;
+    s_inflight_bytes += bytes;
+    return slot;
+}
+
+/* Send a QoS-1 PUBLISH from an in-flight slot. Used for both first transmit
+ * (dup=false) and retransmits (dup=true). On send error the slot is left
+ * intact so the next retry tick will try again. */
+static void inflight_transmit(int client_idx, int slot, bool dup)
+{
+    broker_inflight_t *e = &s_inflight[client_idx][slot];
+    int out_len = mqtt_build_publish_ex(s_send_buf, s_buf_size,
+                                        e->topic, e->topic_len,
+                                        e->payload, e->payload_len,
+                                        /*qos=*/1, e->retain, dup, e->packet_id);
+    if (out_len < 0) {
+        ESP_LOGW(TAG, "QoS1 PUBLISH too large to forward (%lu bytes, pkid=%u)",
+                 (unsigned long)e->payload_len, e->packet_id);
+        inflight_free_slot(client_idx, slot);
+        return;
+    }
+    client_send(client_idx, s_send_buf, out_len);
+}
+
+/* Walk every client's in-flight table and resend any messages whose retry
+ * deadline has passed. Called from the main broker_task loop, so it must be
+ * cheap when nothing is due (early-exit on inactive slots). */
+static void inflight_walk(int64_t now)
+{
+    if (!s_inflight) return;
+    for (int ci = 0; ci < BROKER_MAX_CLIENTS; ci++) {
+        if (s_clients[ci].fd < 0 || !s_clients[ci].connected) continue;
+        for (int s = 0; s < BROKER_INFLIGHT_PER_CLIENT_MAX; s++) {
+            broker_inflight_t *e = &s_inflight[ci][s];
+            if (!e->active) continue;
+            if (now < e->next_retry_ms) continue;
+
+            if (e->retries >= BROKER_INFLIGHT_RETRY_MAX) {
+                ESP_LOGW(TAG, "Abandoning QoS1 msg pkid=%u to client '%s' after %u retries",
+                         e->packet_id, s_clients[ci].client_id, e->retries);
+                s_inflight_dropped++;
+                inflight_free_slot(ci, s);
+                continue;
+            }
+
+            e->retries++;
+            /* Exponential backoff: 15s, 30s, 60s, 60s, 60s. */
+            int64_t delay = (int64_t)BROKER_INFLIGHT_RETRY_INITIAL_MS << (e->retries - 1);
+            if (delay > BROKER_INFLIGHT_RETRY_MAX_MS) delay = BROKER_INFLIGHT_RETRY_MAX_MS;
+            e->next_retry_ms = now + delay;
+
+            ESP_LOGD(TAG, "Resend QoS1 pkid=%u to '%s' retry=%u",
+                     e->packet_id, s_clients[ci].client_id, e->retries);
+            inflight_transmit(ci, s, /*dup=*/true);
+        }
+    }
+}
+
 /* Internal: fanout a publish that has already been parsed/validated.
  * Called by handle_publish (from real TCP clients) and by the tester drain
- * path (from web UI). Runs on broker_task only. */
+ * path (from web UI). Runs on broker_task only.
+ *
+ * Per [MQTT-3.3.1-9]: the QoS at which a message is delivered to a
+ * subscriber is min(publisher_qos, granted_qos). The caller passes the
+ * publisher_qos (clamped to 0 or 1 here — QoS 2 is dropped before this).
+ */
 static void handle_publish_internal(const char *topic, uint16_t topic_len,
                                     const uint8_t *payload, uint32_t payload_len,
-                                    bool retain)
+                                    bool retain, uint8_t pub_qos)
 {
     /* Store/update/delete retained message if retain flag is set */
     if (retain && s_retain_enabled) {
         retain_store(topic, topic_len, payload, payload_len);
     }
 
-    /* Build the outgoing PUBLISH packet once */
-    int out_len = mqtt_build_publish(s_send_buf, s_buf_size,
-                                     topic, topic_len,
-                                     payload, payload_len,
-                                     false);  /* don't retain on forward */
-    if (out_len < 0) {
+    /* Build the QoS-0 forward packet once — used for all QoS-0 subscribers. */
+    int q0_len = mqtt_build_publish(s_send_buf, s_buf_size,
+                                    topic, topic_len,
+                                    payload, payload_len,
+                                    false);  /* don't retain on forward */
+    if (q0_len < 0) {
         ESP_LOGW(TAG, "PUBLISH too large to forward (%lu bytes)",
                  (unsigned long)payload_len);
         return;
     }
 
-    /* Route to all matching subscribers */
+    int64_t now = get_time_ms();
+
+    /* Route to all matching subscribers. We do two-pass send: first all
+     * QoS-0 deliveries using the prebuilt buffer, then QoS-1 deliveries one
+     * at a time (each rebuilds s_send_buf with a per-recipient packet id). */
     for (int i = 0; i < BROKER_MAX_SUBSCRIPTIONS; i++) {
         if (!s_subs[i].active) continue;
         if (!mqtt_topic_matches(s_subs[i].topic, s_subs[i].topic_len,
                                 topic, topic_len)) continue;
 
         int ci = s_subs[i].client_idx;
-        if (s_clients[ci].fd >= 0 && s_clients[ci].connected) {
-            client_send(ci, s_send_buf, out_len);
+        if (s_clients[ci].fd < 0 || !s_clients[ci].connected) continue;
+
+        /* Effective delivery QoS = min(publisher_qos, granted). */
+        uint8_t eff_qos = pub_qos < s_subs[i].qos ? pub_qos : s_subs[i].qos;
+
+        if (eff_qos == 0) {
+            client_send(ci, s_send_buf, q0_len);
+            continue;
         }
+
+        /* QoS 1: try to enqueue in the in-flight table. If the table is
+         * full or the memory cap is hit, fall back to a one-shot QoS-0
+         * send so the message still propagates (degraded but not lost
+         * in the common case where the subscriber is still online). */
+        int slot = inflight_enqueue(ci, topic, topic_len,
+                                    payload, payload_len, false, now);
+        if (slot < 0) {
+            ESP_LOGW(TAG, "QoS1 inflight full for '%s' — degrading to QoS 0",
+                     s_clients[ci].client_id);
+            client_send(ci, s_send_buf, q0_len);
+            continue;
+        }
+        inflight_transmit(ci, slot, /*dup=*/false);
     }
+
+    /* s_send_buf may have been overwritten by QoS-1 transmits; rebuild for
+     * tester fanout if needed. (Tester only takes the raw payload.) */
 
 #if BROKER_TESTER_ENABLED
     /* After-fanout hook: deliver to tester consumers. Non-blocking, never
@@ -870,10 +1123,11 @@ static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)
     ESP_LOGD(TAG, "PUB qos=%d '%s' (%lu bytes) from client %d",
              pub.qos, pub.topic, (unsigned long)pub.payload_len, idx);
 
-    /* Fanout at QoS 0 to subscribers (spec-compliant downgrade; granted in
-     * SUBACK). Future phase 3 will deliver at min(pub.qos, sub.qos). */
+    /* Fanout. Per-subscriber delivery QoS = min(pub.qos, granted_qos) —
+     * handled inside handle_publish_internal. */
     handle_publish_internal(pub.topic, pub.topic_len,
-                            pub.payload, pub.payload_len, pub.retain);
+                            pub.payload, pub.payload_len, pub.retain,
+                            pub.qos);
 
     /* QoS 1: acknowledge after fanout has been attempted. We send PUBACK
      * unconditionally once fanout has run — the MQTT 3.1.1 spec only requires
@@ -950,14 +1204,34 @@ static void process_client_data(int idx)
             case 0xE0:  /* DISCONNECT */
                 handle_disconnect(idx);
                 return;  /* client is gone */
-            case 0x40:  /* PUBACK */
+            case 0x40: {  /* PUBACK: client acknowledging our QoS-1 PUBLISH */
+                uint16_t pkid = 0;
+                if (mqtt_parse_ack(c->recv_buf, pkt_len, &pkid) == 0 && s_inflight) {
+                    bool freed = false;
+                    for (int s = 0; s < BROKER_INFLIGHT_PER_CLIENT_MAX; s++) {
+                        if (s_inflight[idx][s].active &&
+                            s_inflight[idx][s].packet_id == pkid) {
+                            ESP_LOGD(TAG, "PUBACK pkid=%u from '%s' (retries=%u)",
+                                     pkid, c->client_id, s_inflight[idx][s].retries);
+                            inflight_free_slot(idx, s);
+                            freed = true;
+                            break;
+                        }
+                    }
+                    if (!freed) {
+                        ESP_LOGD(TAG, "PUBACK pkid=%u from '%s' (no matching slot)",
+                                 pkid, c->client_id);
+                    }
+                }
+                c->last_activity = get_time_ms();
+                break;
+            }
             case 0x50:  /* PUBREC */
             case 0x60:  /* PUBREL (top nibble — flags ignored here) */
             case 0x70:  /* PUBCOMP */
-                /* Phase 2: broker fan-out is QoS 0 only, so clients should
-                 * never send these to us. If a misbehaving client does,
-                 * silently consume the frame instead of disconnecting them. */
-                ESP_LOGD(TAG, "Ignoring unsolicited ack 0x%02X from client %d",
+                /* QoS 2 not yet supported. Silently consume rather than
+                 * disconnect a misbehaving client. */
+                ESP_LOGD(TAG, "Ignoring unsolicited QoS-2 ack 0x%02X from client %d",
                          pkt_type, idx);
                 break;
             default:
@@ -1044,15 +1318,29 @@ static void broker_task(void *arg)
         s_send_buf = (uint8_t *)malloc(s_buf_size);
     }
 
-    if (!s_clients || !s_subs || !s_send_buf) {
+    /* In-flight tables for outbound QoS-1 (per-client, fixed slots,
+     * PSRAM-resident). Per-message topic+payload buffers are allocated on
+     * demand under BROKER_INFLIGHT_TOTAL_BYTES_MAX. */
+    {
+        size_t rowbytes = sizeof(broker_inflight_t) * BROKER_INFLIGHT_PER_CLIENT_MAX;
+        s_inflight = heap_caps_calloc(BROKER_MAX_CLIENTS, rowbytes, MALLOC_CAP_SPIRAM);
+        if (!s_inflight) {
+            ESP_LOGW(TAG, "PSRAM alloc failed for inflight tables, trying default heap");
+            s_inflight = calloc(BROKER_MAX_CLIENTS, rowbytes);
+        }
+    }
+
+    if (!s_clients || !s_subs || !s_send_buf || !s_inflight) {
         ESP_LOGE(TAG, "Failed to allocate broker memory!");
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Broker state: clients=%u KB, subs=%u KB, retained=%u KB limit",
+    ESP_LOGI(TAG, "Broker state: clients=%u KB, subs=%u KB, inflight=%u KB, retained=%u KB limit",
              (unsigned)(BROKER_MAX_CLIENTS * sizeof(broker_client_t) / 1024),
              (unsigned)(BROKER_MAX_SUBSCRIPTIONS * sizeof(broker_sub_t) / 1024),
+             (unsigned)(BROKER_MAX_CLIENTS * BROKER_INFLIGHT_PER_CLIENT_MAX *
+                        sizeof(broker_inflight_t) / 1024),
              (unsigned)(get_psram_total() * BROKER_RETAIN_MEM_PCT / 100 / 1024));
 
     /* Initialize client slots and allocate recv buffers */
@@ -1235,16 +1523,29 @@ static void broker_task(void *arg)
             last_keepalive_check = now;
         }
 
+        /* Walk outbound QoS-1 in-flight tables for due retries. Cheap when
+         * idle (most slots are inactive). */
+        inflight_walk(now);
+
         /* Log stats every 30 seconds */
         if ((now - last_stats) > 30000) {
             int sub_count = 0;
             for (int i = 0; i < BROKER_MAX_SUBSCRIPTIONS; i++) {
                 if (s_subs[i].active) sub_count++;
             }
-            ESP_LOGI(TAG, "Stats: clients=%d, subs=%d, retained=%u (%lu KB), free_heap=%lu",
+            int inflight_total = 0;
+            for (int i = 0; i < BROKER_MAX_CLIENTS; i++) {
+                inflight_total += inflight_count_for_client(i);
+            }
+            ESP_LOGI(TAG, "Stats: clients=%d, subs=%d, retained=%u (%lu KB), "
+                          "inflight=%d (%lu KB), dropped=%lu, cap_skips=%lu, free_heap=%lu",
                      s_num_connected, sub_count,
                      (unsigned)s_retained_count,
                      (unsigned long)(s_retained_bytes / 1024),
+                     inflight_total,
+                     (unsigned long)(s_inflight_bytes / 1024),
+                     (unsigned long)s_inflight_dropped,
+                     (unsigned long)s_inflight_cap_skips,
                      (unsigned long)esp_get_free_heap_size());
             last_stats = now;
 
@@ -1314,6 +1615,7 @@ int broker_get_clients(broker_client_info_t *out, int max_out)
             }
         }
         out[n].subscriptions = subs;
+        out[n].inflight = inflight_count_for_client(i);
         out[n].published = s_clients[i].published;
         n++;
     }

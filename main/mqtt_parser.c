@@ -425,24 +425,47 @@ int mqtt_build_pingresp(uint8_t *buf)
     return 2;
 }
 
+/* Backward-compatible QoS 0 publish (thin wrapper around the QoS-aware
+ * builder; old call sites continue to work). */
 int mqtt_build_publish(uint8_t *buf, size_t buf_size,
                        const char *topic, uint16_t topic_len,
                        const uint8_t *payload, uint32_t payload_len,
                        bool retain)
 {
-    uint32_t remaining = 2 + topic_len + payload_len;  /* QoS 0: no packet id */
+    return mqtt_build_publish_ex(buf, buf_size, topic, topic_len,
+                                 payload, payload_len,
+                                 /*qos=*/0, retain, /*dup=*/false,
+                                 /*packet_id=*/0);
+}
 
-    /* Calculate total size needed */
+int mqtt_build_publish_ex(uint8_t *buf, size_t buf_size,
+                          const char *topic, uint16_t topic_len,
+                          const uint8_t *payload, uint32_t payload_len,
+                          uint8_t qos, bool retain, bool dup,
+                          uint16_t packet_id)
+{
+    if (qos > 2) return -1;
+
+    /* Variable header = topic length-prefixed string (2 + topic_len) plus
+     * packet identifier (2 bytes) when qos > 0. */
+    uint32_t remaining = 2 + (uint32_t)topic_len + payload_len;
+    if (qos > 0) remaining += 2;
+
     uint8_t rl_buf[4];
     int rl_bytes = mqtt_encode_remaining_length(rl_buf, remaining);
     size_t total = 1 + (size_t)rl_bytes + remaining;
-
     if (total > buf_size) return -1;
 
     int pos = 0;
 
-    /* Fixed header: PUBLISH, QoS 0, retain flag */
-    buf[pos++] = 0x30 | (retain ? 0x01 : 0x00);
+    /* Fixed header byte: type(0x30) | (dup<<3) | (qos<<1) | retain.
+     * Per [MQTT-3.3.1-1]: DUP MUST be 0 on first transmission and MUST be 1
+     * on retransmissions of QoS-1/2 messages. Caller controls dup. */
+    uint8_t fh = 0x30;
+    if (qos > 0 && dup) fh |= 0x08;
+    fh |= (uint8_t)((qos & 0x03) << 1);
+    if (retain)         fh |= 0x01;
+    buf[pos++] = fh;
 
     /* Remaining length */
     memcpy(buf + pos, rl_buf, rl_bytes);
@@ -453,6 +476,12 @@ int mqtt_build_publish(uint8_t *buf, size_t buf_size,
     pos += 2;
     memcpy(buf + pos, topic, topic_len);
     pos += topic_len;
+
+    /* Packet identifier (QoS > 0 only) */
+    if (qos > 0) {
+        write_u16(buf + pos, packet_id);
+        pos += 2;
+    }
 
     /* Payload */
     if (payload_len > 0 && payload != NULL) {

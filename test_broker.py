@@ -999,7 +999,7 @@ def test_unsubscribe():
 # ══════════════════════════════════════════════════════════════
 
 def test_qos1_inbound():
-    section("16. QoS 1 Inbound (PUBACK + downgraded fanout)")
+    section("16. QoS 1 Inbound (PUBACK + fanout)")
 
     received = []
     lock = threading.Lock()
@@ -1011,7 +1011,7 @@ def test_qos1_inbound():
     sub = make_client("test-qos1-sub", on_message=on_msg)
     pub = make_client("test-qos1-pub")
 
-    # Subscribe with QoS 1 — broker may grant 0 (downgrade is spec-compliant).
+    # Subscribe with QoS 1 — phase 3 broker grants 1, delivers at QoS 1.
     sub_rc, _mid = sub.subscribe("test/qos1/#", qos=1)
     if sub_rc != mqtt.MQTT_ERR_SUCCESS:
         fail(f"SUBSCRIBE qos=1 failed: rc={sub_rc}")
@@ -1042,7 +1042,7 @@ def test_qos1_inbound():
     with lock:
         msgs = list(received)
     if any(t == "test/qos1/hello" and p == b"hello-qos1" for t, p, _q in msgs):
-        ok("Subscriber received the QoS 1 message (fanned out at downgraded QoS)")
+        ok("Subscriber received the QoS 1 message")
     else:
         fail(f"Subscriber missed the QoS 1 message; received={msgs}")
 
@@ -1071,11 +1071,125 @@ def test_qos1_inbound():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 17: Firmware Version in API
+#  TEST 17: QoS 1 Outbound (SUBACK grant, delivery QoS, inflight)
+# ══════════════════════════════════════════════════════════════
+
+def test_qos1_outbound():
+    section("17. QoS 1 Outbound (broker → subscriber)")
+
+    received = []
+    granted_qos = []
+    lock = threading.Lock()
+
+    def on_msg(client, userdata, msg):
+        with lock:
+            received.append((msg.topic, msg.payload, msg.qos))
+
+    def on_sub(client, userdata, mid, granted, properties=None):
+        # paho v2 passes a list of ReasonCode (or int for v3.1.1)
+        with lock:
+            for g in granted:
+                granted_qos.append(int(g.value) if hasattr(g, "value") else int(g))
+
+    sub = make_client("test-qos1-out-sub", on_message=on_msg)
+    sub.on_subscribe = on_sub
+    pub = make_client("test-qos1-out-pub")
+
+    sub.subscribe("test/qos1out/#", qos=1)
+    for _ in range(20):
+        time.sleep(0.1)
+        with lock:
+            if granted_qos: break
+
+    with lock:
+        gq = list(granted_qos)
+    if gq and gq[0] == 1:
+        ok(f"SUBACK granted QoS 1 (got {gq})")
+    elif gq and gq[0] == 0:
+        fail(f"SUBACK granted QoS 0 — phase 3 should grant min(req,1)=1 (got {gq})")
+        cleanup(sub, pub)
+        return
+    else:
+        fail(f"SUBACK never arrived or invalid: {gq}")
+        cleanup(sub, pub)
+        return
+
+    # Publish at QoS 0 — effective delivery = min(0, 1) = 0
+    pub.publish("test/qos1out/q0", b"from-q0", qos=0)
+    time.sleep(0.5)
+    with lock:
+        q0 = [(t,p,q) for t,p,q in received if t == "test/qos1out/q0"]
+    if q0 and q0[0][2] == 0:
+        ok("QoS-0 publish delivered at QoS 0 (min(pub,granted))")
+    elif q0:
+        fail(f"QoS-0 publish delivered at qos={q0[0][2]}, expected 0")
+    else:
+        fail("Subscriber missed QoS-0 publish")
+
+    # Publish at QoS 1 — effective delivery = min(1, 1) = 1
+    info = pub.publish("test/qos1out/q1", b"from-q1", qos=1)
+    info.wait_for_publish(timeout=5)
+    time.sleep(0.5)
+    with lock:
+        q1 = [(t,p,q) for t,p,q in received if t == "test/qos1out/q1"]
+    if q1 and q1[0][2] == 1:
+        ok("QoS-1 publish delivered at QoS 1 (broker outbound QoS 1 working)")
+    elif q1:
+        fail(f"QoS-1 publish delivered at qos={q1[0][2]}, expected 1")
+    else:
+        fail("Subscriber missed QoS-1 publish")
+
+    # No duplicate delivery after PUBACK round-trip
+    with lock:
+        q1_count = sum(1 for t,_p,_q in received if t == "test/qos1out/q1")
+    if q1_count == 1:
+        ok("Exactly-once delivery (no duplicate after PUBACK round-trip)")
+    else:
+        fail(f"Subscriber got {q1_count} copies of QoS-1 message (expected 1)")
+
+    # /api/clients exposes 'inflight'; should settle to 0
+    if requests is not None:
+        try:
+            time.sleep(0.5)
+            data = requests.get(f"{HTTP_BASE}/api/clients", timeout=5).json()
+            mqtt_clients = data.get("mqtt", [])
+            if any("inflight" in c for c in mqtt_clients):
+                ok("/api/clients exposes 'inflight' field")
+            else:
+                fail("/api/clients missing 'inflight' field")
+            our_sub = [c for c in mqtt_clients if c.get("client_id") == "test-qos1-out-sub"]
+            if our_sub and our_sub[0].get("inflight", -1) == 0:
+                ok("Subscriber has inflight=0 after PUBACK settled")
+            elif our_sub:
+                fail(f"Subscriber has inflight={our_sub[0].get('inflight')}, expected 0")
+        except Exception as e:
+            fail(f"Inflight API check failed: {e}")
+
+    # Burst of 20 QoS-1 publishes
+    received.clear()
+    infos = [pub.publish("test/qos1out/burst", f"m{i}".encode(), qos=1) for i in range(20)]
+    for info in infos:
+        info.wait_for_publish(timeout=5)
+    time.sleep(1.5)
+    with lock:
+        burst = [(t,p,q) for t,p,q in received if t == "test/qos1out/burst"]
+    burst_q1 = sum(1 for _t,_p,q in burst if q == 1)
+    if burst_q1 == 20:
+        ok(f"Burst: all 20 delivered at QoS 1 ({burst_q1}/20)")
+    elif len(burst) == 20:
+        fail(f"Burst: 20 delivered but only {burst_q1} at QoS 1")
+    else:
+        fail(f"Burst: {len(burst)}/20 messages delivered")
+
+    cleanup(sub, pub)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TEST 18: Firmware Version in API
 # ══════════════════════════════════════════════════════════════
 
 def test_firmware_version():
-    section("17. Firmware Version in API")
+    section("18. Firmware Version in API")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1120,11 +1234,11 @@ def test_firmware_version():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 18: Firmware Update Page
+#  TEST 19: Firmware Update Page
 # ══════════════════════════════════════════════════════════════
 
 def test_firmware_update_page():
-    section("18. Firmware Update Page")
+    section("19. Firmware Update Page")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1170,11 +1284,11 @@ def test_firmware_update_page():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 19: Connected Clients Page and API
+#  TEST 20: Connected Clients Page and API
 # ══════════════════════════════════════════════════════════════
 
 def test_connected_clients():
-    section("19. Connected Clients Page and API")
+    section("20. Connected Clients Page and API")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1310,11 +1424,11 @@ def test_connected_clients():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 20: Version in Dashboard and Footer
+#  TEST 21: Version in Dashboard and Footer
 # ══════════════════════════════════════════════════════════════
 
 def test_version_display():
-    section("20. Version in Information Page and Footer")
+    section("21. Version in Information Page and Footer")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1416,6 +1530,7 @@ def main():
     test_many_topics()
     test_unsubscribe()
     test_qos1_inbound()
+    test_qos1_outbound()
     test_portal_api()
     test_portal_pages()
     test_portal_save_settings()

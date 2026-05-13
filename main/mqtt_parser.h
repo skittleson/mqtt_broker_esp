@@ -204,6 +204,21 @@ int mqtt_build_publish(uint8_t *buf, size_t buf_size,
                        const uint8_t *payload, uint32_t payload_len,
                        bool retain);
 
+/**
+ * Build a PUBLISH packet at the requested QoS level. For QoS >= 1 a packet
+ * identifier is included in the variable header. The dup flag MUST be set
+ * (true) on retransmissions of a previously sent QoS-1 or QoS-2 message and
+ * MUST be clear (false) on the first transmission [MQTT-3.3.1-1]. For QoS 0,
+ * packet_id and dup are ignored.
+ *
+ * @return bytes written, or -1 if buffer too small.
+ */
+int mqtt_build_publish_ex(uint8_t *buf, size_t buf_size,
+                          const char *topic, uint16_t topic_len,
+                          const uint8_t *payload, uint32_t payload_len,
+                          uint8_t qos, bool retain, bool dup,
+                          uint16_t packet_id);
+
 /* ---- Topic matching ---- */
 
 /**

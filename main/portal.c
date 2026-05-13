@@ -1580,13 +1580,14 @@ static void handle_http_client(int client_fd)
         } else {
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                 "<table><tr>"
-                "<th style='width:22%%'>Client ID</th>"
-                "<th style='width:18%%'>IP Address</th>"
-                "<th style='width:13%%'>Connected</th>"
-                "<th style='width:13%%'>Last Active</th>"
-                "<th style='width:8%%' title='Active subscriptions'>Subs</th>"
+                "<th style='width:20%%'>Client ID</th>"
+                "<th style='width:16%%'>IP Address</th>"
+                "<th style='width:12%%'>Connected</th>"
+                "<th style='width:12%%'>Last Active</th>"
+                "<th style='width:7%%' title='Active subscriptions'>Subs</th>"
+                "<th style='width:8%%' title='Outbound QoS-1 messages awaiting PUBACK from this client'>In-Flight</th>"
                 "<th style='width:13%%' title='PUBLISH packets accepted from this client since it connected'>Published</th>"
-                "<th style='width:13%%'>Keep-Alive</th>"
+                "<th style='width:12%%'>Keep-Alive</th>"
                 "</tr>");
 
             for (int i = 0; i < mqtt_count && pos < PAGE_BUF_SIZE - 256; i++) {
@@ -1601,12 +1602,13 @@ static void handle_http_client(int client_fd)
                     "<tr><td>%s</td>"
                     "<td><a href='http://%s/' target='_blank' rel='noopener'>%s</a></td>"
                     "<td>%dh %dm %ds</td><td>%ds ago</td>"
-                    "<td>%d</td><td>%lu</td><td>%us</td></tr>",
+                    "<td>%d</td><td>%d</td><td>%lu</td><td>%us</td></tr>",
                     clients[i].client_id[0] ? clients[i].client_id : "<em>(empty)</em>",
                     clients[i].ip, clients[i].ip,
                     conn_h, conn_m, conn_s,
                     last_sec,
                     clients[i].subscriptions,
+                    clients[i].inflight,
                     (unsigned long)clients[i].published,
                     clients[i].keep_alive);
             }
@@ -1674,11 +1676,12 @@ static void handle_http_client(int client_fd)
             pos += snprintf(json + pos, PAGE_BUF_SIZE - pos,
                 "{\"client_id\":\"%s\",\"ip\":\"%s\","
                 "\"connected_s\":%lld,\"last_active_s\":%lld,"
-                "\"subs\":%d,\"published\":%lu,\"keep_alive\":%u}",
+                "\"subs\":%d,\"inflight\":%d,\"published\":%lu,\"keep_alive\":%u}",
                 clients[i].client_id, clients[i].ip,
                 (long long)(clients[i].connected_ms / 1000),
                 (long long)(clients[i].last_active_ms / 1000),
                 clients[i].subscriptions,
+                clients[i].inflight,
                 (unsigned long)clients[i].published,
                 clients[i].keep_alive);
         }

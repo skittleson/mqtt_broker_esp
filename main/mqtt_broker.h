@@ -30,6 +30,20 @@
 #define BROKER_SELECT_TIMEOUT_MS    100
 #define BROKER_KEEPALIVE_GRACE_SEC  10    /* extra seconds before disconnect */
 
+/* ---- Outbound QoS 1 in-flight tracking ----
+ * When a subscriber is granted QoS 1, every PUBLISH we send to them is
+ * tracked in an in-flight slot until the matching PUBACK arrives. If the
+ * PUBACK doesn't come within the retry timeout the message is resent with
+ * DUP=1. After BROKER_INFLIGHT_RETRY_MAX retransmissions the broker gives
+ * up and frees the slot (the subscriber will resync via reconnect if it
+ * was a clean=false session — not yet implemented; phase 4).
+ */
+#define BROKER_INFLIGHT_PER_CLIENT_MAX  20
+#define BROKER_INFLIGHT_TOTAL_BYTES_MAX (2u * 1024u * 1024u)  /* 2 MB global cap */
+#define BROKER_INFLIGHT_RETRY_INITIAL_MS 15000
+#define BROKER_INFLIGHT_RETRY_MAX_MS     60000  /* cap for exponential backoff */
+#define BROKER_INFLIGHT_RETRY_MAX        5      /* abandon after N retries */
+
 /* ---- Retained message configuration ---- */
 #define BROKER_RETAIN_TTL_SEC_DEFAULT  (7 * 24 * 3600)  /* 1 week default */
 #define BROKER_RETAIN_MEM_PCT       80                /* max % of PSRAM for retained msgs */
@@ -82,6 +96,7 @@ typedef struct {
     char     client_id[64];   /* MQTT client identifier */
     char     ip[16];          /* IP address string */
     int      subscriptions;   /* number of active subscriptions */
+    int      inflight;        /* outbound QoS 1 messages awaiting PUBACK */
     uint32_t published;       /* total PUBLISH messages accepted from this client */
     int64_t  connected_ms;    /* how long connected (milliseconds) */
     int64_t  last_active_ms;  /* ms since last activity */
