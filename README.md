@@ -31,6 +31,11 @@
 
 ---
 
+## What's new in 0.6.2
+
+- **Reboot countdown page** replaces the broken `Rebooting...` dead-end. Whenever the device intentionally goes away (`/reboot`, `/ota-rollback`, OTA upload success, OTA URL success), it returns a standalone page that polls `/api/status` every 1 s, watches for the offline edge so it can't be tricked by a stale in-flight response, and swaps itself for a green `Back online` link the moment the new firmware answers. New read-only `GET /rebooting` endpoint serves the same page without restarting — used by the `/update` upload XHR to redirect users straight to the countdown instead of waiting on a frozen 10-second progress bar.
+- **Honest `Other Partition` / Rollback version display.** `PROJECT_VER` is now pulled from `main/version.h` at configure time, so `esp_app_desc_t.version` in the OTA image header matches `FW_VERSION`. The `/update` page no longer shows a confusing git-describe string (`tester-v0.3.0-4-g30c64db-dirty`) on the inactive slot — it shows `0.6.2`, exactly what you'd be rolling back to.
+
 ## What's new in 0.6.0 (UX honesty pass)
 
 - **Dashboard now tells the truth.** Single coherent status pill (`Online · Ethernet 192.168.x.x` / `Online · WiFi <ssid>` / `Setup · AP mode @ <ip>`) replaces the old contradictory stack of an orange "AP mode" warning above a green "Ethernet online" badge.
@@ -255,7 +260,7 @@ The firmware update page provides three flows for over-the-air (OTA) management:
 
 - **File Upload** — select a `.bin` firmware file from your computer and upload it directly to the device. Includes a progress bar and automatic reboot on success.
 - **URL Fetch** — provide an `http://` or `https://` URL to a hosted firmware binary. The device downloads and flashes it.
-- **Rollback** — if the *other* OTA partition holds a valid app, the page shows its version and offers a `Roll back & Reboot` button. One click switches `esp_ota_set_boot_partition` back to the previous slot and reboots. The current image stays in flash, so the same button bounces you back. This is manual rollback by design — bootloader auto-rollback is not enabled (it would brick first upgrade without an in-app self-test wired up; that's on the roadmap).
+- **Rollback** — if the _other_ OTA partition holds a valid app, the page shows its version and offers a `Roll back & Reboot` button. One click switches `esp_ota_set_boot_partition` back to the previous slot and reboots. The current image stays in flash, so the same button bounces you back. This is manual rollback by design — bootloader auto-rollback is not enabled (it would brick first upgrade without an in-app self-test wired up; that's on the roadmap).
 
 The device uses dual OTA partitions (`ota_0` / `ota_1`) so the running firmware is never overwritten during an update. If an update fails to validate, the previous firmware remains intact.
 
@@ -304,24 +309,25 @@ The update page also shows current firmware information (version, build date, ID
 
 ### All Endpoints
 
-| Path             | Method | Description                                     |
-| ---------------- | ------ | ----------------------------------------------- |
-| `/`              | GET    | Main dashboard with live stats                  |
+| Path             | Method | Description                                               |
+| ---------------- | ------ | --------------------------------------------------------- |
+| `/`              | GET    | Main dashboard with live stats                            |
 | `/clients`       | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh) |
-| `/settings`      | GET    | Settings form (MQTT, retain, AP)                |
-| `/config`        | GET    | WiFi configuration form                         |
-| `/update`        | GET    | Firmware update page (upload + URL)             |
-| `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)       |
-| `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`) |
-| `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot |
-| `/save-settings` | POST   | Save broker/AP settings to NVS                  |
-| `/save`          | POST   | Save WiFi credentials                           |
-| `/clear`         | GET    | Clear saved WiFi credentials                    |
-| `/reconnect`     | GET    | Reconnect to saved WiFi                         |
-| `/ap-toggle`     | GET    | Toggle AP mode                                  |
-| `/reboot`        | GET    | Reboot the device                               |
-| `/api/status`    | GET    | JSON API — broker stats, firmware version       |
-| `/api/clients`   | GET    | JSON API — connected MQTT + WiFi AP clients     |
+| `/settings`      | GET    | Settings form (MQTT, retain, AP)                          |
+| `/config`        | GET    | WiFi configuration form                                   |
+| `/update`        | GET    | Firmware update page (upload + URL)                       |
+| `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)                 |
+| `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`)     |
+| `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot    |
+| `/rebooting`     | GET    | Standalone reboot countdown page (read-only, no reboot)   |
+| `/save-settings` | POST   | Save broker/AP settings to NVS                            |
+| `/save`          | POST   | Save WiFi credentials                                     |
+| `/clear`         | GET    | Clear saved WiFi credentials                              |
+| `/reconnect`     | GET    | Reconnect to saved WiFi                                   |
+| `/ap-toggle`     | GET    | Toggle AP mode                                            |
+| `/reboot`        | GET    | Reboot the device                                         |
+| `/api/status`    | GET    | JSON API — broker stats, firmware version                 |
+| `/api/clients`   | GET    | JSON API — connected MQTT + WiFi AP clients               |
 
 ## Configuration
 
@@ -347,7 +353,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                 |
 | ------------------------- | --------------- | ---------------------------------------------------- |
-| Firmware version          | 0.6.0           | `version.h`                                          |
+| Firmware version          | 0.6.2           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)         |
 | Max clients               | 100             | `mqtt_broker.h`                                      |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                      |
