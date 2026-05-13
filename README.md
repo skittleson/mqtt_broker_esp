@@ -31,6 +31,30 @@
 
 ---
 
+## What's new in 0.7.0-rc1 (NTP Phase 1: SNTP client)
+
+First slice of [`plan-ntp-server.md`](plan-ntp-server.md). The broker now has
+real wall-clock time, served from public NTP and exposed three ways:
+
+- **`GET /api/time`** — open (auth-exempt like `/api/ping`). Returns
+  `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.
+  Any LAN client can verify the broker is time-synced without credentials;
+  no settings or secrets in the response.
+- **`POST /api/time/resync`** — auth-gated. Forces an immediate upstream
+  poll. Useful after a network outage to confirm the broker re-locks
+  before you go to bed.
+- **`$SYS/broker/time`** — published every 10 s while synced, payload is
+  ASCII epoch seconds. Subscribers see fresh time without HTTP polling.
+- **`Time (NTP)` section in `/settings`** — live sync state (“synced · last
+  14s ago · 3 total”), enable toggle, three upstream slots, poll interval,
+  POSIX TZ string.
+
+Measured device-vs-host offset: **—332 ms** against a separately-synced host
+clock; drift from `pool.ntp.org` directly is well below 50 ms.
+
+Not in this release (Phase 2/3/4): SNTP server on UDP :123, DHCP option 42
+advertise-self, `/time` portal page, manual `POST /api/time/set`.
+
 ## What's new in 0.6.6 (portal latency: A + E + F)
 
 Gives the portal the 'dedicated core' property users intuitively expect, kills the 100–250 ms slow tail, and adds runtime visibility into request latency. See [`docs/portal-latency-analysis.md`](docs/portal-latency-analysis.md) for the full analysis and measurements.
@@ -41,12 +65,12 @@ Gives the portal the 'dedicated core' property users intuitively expect, kills t
 
 Measured improvement (3 rounds, 30 requests each, live device with 6 connected MQTT clients):
 
-| Metric            | 0.6.4 baseline | 0.6.6        | Delta     |
-| ----------------- | -------------: | -----------: | --------- |
-| median            | 16.0 ms        | 19.5 ms      | +3.5 ms   |
-| **p95**           | **129.3 ms**   | **~54 ms**   | **-58 %** |
-| **max**           | **136.0 ms**   | **~70 ms**   | **-49 %** |
-| requests > 100 ms | 12 %           | **0 %**      | **gone**  |
+| Metric            | 0.6.4 baseline |      0.6.6 | Delta     |
+| ----------------- | -------------: | ---------: | --------- |
+| median            |        16.0 ms |    19.5 ms | +3.5 ms   |
+| **p95**           |   **129.3 ms** | **~54 ms** | **-58 %** |
+| **max**           |   **136.0 ms** | **~70 ms** | **-49 %** |
+| requests > 100 ms |           12 % |    **0 %** | **gone**  |
 
 ## What's new in 0.6.4
 
@@ -352,6 +376,8 @@ The update page also shows current firmware information (version, build date, ID
 | `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot                                                                   |
 | `/rebooting`     | GET    | Standalone reboot countdown page (read-only, no reboot)                                                                  |
 | `/api/ping`      | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
+| `/api/time`      | GET    | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`. |
+| `/api/time/resync` | POST | Gated. Force an immediate upstream poll. |
 | `/save-settings` | POST   | Save broker/AP settings to NVS                                                                                           |
 | `/save`          | POST   | Save WiFi credentials                                                                                                    |
 | `/clear`         | GET    | Clear saved WiFi credentials                                                                                             |
@@ -385,7 +411,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                              |
 | ------------------------- | --------------- | ----------------------------------------------------------------- |
-| Firmware version          | 0.6.6           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Firmware version          | 0.7.0-rc1       | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
 | Max clients               | 100             | `mqtt_broker.h`                                                   |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |
