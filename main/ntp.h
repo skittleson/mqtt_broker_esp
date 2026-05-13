@@ -104,6 +104,22 @@ bool ntp_force_resync(void);
  * already running), false if disabled or socket bind failed. */
 bool ntp_server_start(void);
 
+/* One slot of the SNTP server's per-source rate-limit LRU, surfaced for
+ * the /time portal page (Phase 3). The same LRU does rate-limiting, so
+ * this is free observability for the cost of a memcpy. */
+typedef struct {
+    uint32_t addr;            /* source IPv4, network byte order; 0 = unused */
+    int64_t  last_us;         /* esp_timer-us when we last responded */
+    uint32_t total;           /* total responses to this source since boot */
+} ntp_recent_client_t;
+
+#define NTP_RECENT_MAX 32     /* matches NTP_RATE_LRU_SIZE in ntp.c */
+
+/* Copies the active rate-limit LRU entries into `out` (up to max_out).
+ * Returns the number filled. Slots are NOT sorted; caller (e.g. /time
+ * renderer) should sort by last_us if it wants 'most recent first'. */
+int  ntp_get_recent_clients(ntp_recent_client_t *out, int max_out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>   /* gmtime_r/strftime for the /time page (Phase 3 NTP) */
 #include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -1318,6 +1319,7 @@ static void handle_http_client(int client_fd)
             "<a href='/settings' class='btn'>Configuration</a>"
             "<a href='/clients' class='btn'>Connected Clients</a>"
             "<a href='/tester' class='btn'>MQTT Tester</a>"
+            "<a href='/time' class='btn'>Time / NTP</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
             "<a href='/reboot' class='btn bred' "
@@ -2412,6 +2414,148 @@ static void handle_http_client(int client_fd)
         http_response_start(client_fd, ok ? "200 OK" : "503 Service Unavailable",
                             "application/json", len);
         http_send_body(client_fd, json, len);
+
+    /* ============ /time PAGE (Phase 3 of plan-ntp-server.md) ============
+     * Tasmota-style server-rendered HTML. No JS required; uses a
+     * <meta http-equiv='refresh' content='10'> so the clock and counters
+     * stay fresh without polling JS. Shows:
+     *   - Big current-time line (UTC, ISO 8601)
+     *   - Client/server status badges (stratum, sync age, server state)
+     *   - Force-resync button (POST /api/time/resync, GET-safe redirect)
+     *   - Recent-clients table from the rate-limit LRU (last 16 by activity)
+     * Auth-gated like every other portal page; the /api/time JSON
+     * endpoint stays open for programmatic clients. */
+    } else if (strcmp(req.path, "/time") == 0 && req.method == REQ_GET) {
+        ntp_state_t st;
+        ntp_get_state(&st);
+
+        int pos = 0;
+        /* Auto-refresh every 10s so the clock + counters stay current. */
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<meta http-equiv='refresh' content='10'>");
+
+        /* Big current-time block. ISO 8601 in UTC; compact (year, hh:mm:ss). */
+        char iso[40] = "-- not yet synced --";
+        if (st.synced && st.epoch_us > 0) {
+            time_t t = (time_t)(st.epoch_us / 1000000);
+            struct tm tm;
+            gmtime_r(&t, &tm);
+            strftime(iso, sizeof(iso), "%Y-%m-%d %H:%M:%S UTC", &tm);
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<fieldset><legend>&nbsp;Now&nbsp;</legend>"
+            "<p style='font-family:monospace;font-size:1.4em;margin:8px 0;text-align:center;"
+            "color:%s'>%s</p>"
+            "<p style='text-align:center;font-size:0.85em;color:#aaa;margin:0'>"
+            "epoch %lld\xc2\xb5s</p>"
+            "</fieldset>",
+            st.synced ? "#a5d6a7" : "#ffcc80",
+            iso, (long long)st.epoch_us);
+
+        /* Client + server status cards. Sized to accommodate the longest
+         * synced variant: ~80 chars of fixed text + up to 63 chars of
+         * upstream hostname + a couple of numbers. 256 is generous and
+         * silences -Wformat-truncation. */
+        char client_line[256], server_line[256];
+        if (st.synced) {
+            snprintf(client_line, sizeof(client_line),
+                "<span style='color:#a5d6a7'>synced</span> \xc2\xb7 "
+                "last %llds ago \xc2\xb7 %u total \xc2\xb7 upstream <b>%s</b>",
+                (long long)st.last_sync_age_s, (unsigned)st.sync_count,
+                st.upstream_used[0] ? st.upstream_used : "-");
+        } else {
+            snprintf(client_line, sizeof(client_line),
+                "<span style='color:#ffcc80'>not yet synced</span> \xc2\xb7 "
+                "upstream <b>%s</b>",
+                st.upstream_used[0] ? st.upstream_used : "-");
+        }
+        if (st.server_running) {
+            snprintf(server_line, sizeof(server_line),
+                "<span style='color:#a5d6a7'>serving</span> on UDP:123 \xc2\xb7 "
+                "stratum %u \xc2\xb7 %u served \xc2\xb7 "
+                "dropped %u/%u/%u (rate/size/mode)",
+                (unsigned)st.stratum, (unsigned)st.served,
+                (unsigned)st.dropped_rate, (unsigned)st.dropped_size,
+                (unsigned)st.dropped_mode);
+        } else {
+            snprintf(server_line, sizeof(server_line),
+                "<span style='color:#888'>server off</span>");
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<fieldset><legend>&nbsp;Client&nbsp;</legend><p>%s</p></fieldset>"
+            "<fieldset><legend>&nbsp;Server&nbsp;</legend><p>%s</p></fieldset>",
+            client_line, server_line);
+
+        /* Force-resync button. Wraps a POST in a form so we don't need JS;
+         * after the POST the browser follows the JSON response, so we add
+         * a tiny JS handler purely to do a redirect back to /time. The
+         * <noscript> fallback (a plain action='/api/time/resync' form)
+         * leaves the user on the JSON output but still triggers the action. */
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<form id='rsf' method='POST' action='/api/time/resync' style='margin:8px 0'>"
+            "<button type='submit' class='btn'>Force resync</button>"
+            "</form>"
+            "<script>document.getElementById('rsf').onsubmit=function(e){"
+            "e.preventDefault();fetch('/api/time/resync',{method:'POST'})"
+            ".then(function(){setTimeout(function(){location.href='/time';},800);});"
+            "return false;};</script>");
+
+        /* Recent-clients table from the server's rate-limit LRU. Sorted
+         * by last_us descending in-place (simple insertion sort -- max 32
+         * entries, O(n^2) is fine and avoids a qsort link dependency). */
+        ntp_recent_client_t recent[NTP_RECENT_MAX];
+        int rn = ntp_get_recent_clients(recent, NTP_RECENT_MAX);
+        for (int i = 1; i < rn; i++) {
+            ntp_recent_client_t k = recent[i];
+            int j = i - 1;
+            while (j >= 0 && recent[j].last_us < k.last_us) {
+                recent[j + 1] = recent[j];
+                j--;
+            }
+            recent[j + 1] = k;
+        }
+
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<fieldset><legend>&nbsp;Recent clients (%d)&nbsp;</legend>", rn);
+        if (rn == 0) {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<p style='color:#888;text-align:center;padding:10px'>"
+                "No SNTP queries received yet</p>");
+        } else {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<table><tr>"
+                "<th style='width:55%%'>Source IP</th>"
+                "<th style='width:20%%'>Last</th>"
+                "<th style='width:25%%'>Total</th></tr>");
+            int64_t now_us = esp_timer_get_time();
+            /* Cap rendered rows at 16 to keep the page tidy. */
+            int show = rn < 16 ? rn : 16;
+            for (int i = 0; i < show && pos < (int)PAGE_BUF_SIZE - 256; i++) {
+                uint32_t a = recent[i].addr;
+                /* sin_addr.s_addr is network byte order: byte 0 is the
+                 * first octet. */
+                uint8_t o0 = a & 0xff, o1 = (a >> 8) & 0xff,
+                        o2 = (a >> 16) & 0xff, o3 = (a >> 24) & 0xff;
+                int64_t age_s = (now_us - recent[i].last_us) / 1000000;
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<tr><td>%u.%u.%u.%u</td><td>%llds ago</td><td>%u</td></tr>",
+                    o0, o1, o2, o3, (long long)age_s, (unsigned)recent[i].total);
+            }
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table>");
+            if (rn > show) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<p style='color:#888;font-size:0.8em;text-align:center'>"
+                    "(%d more not shown)</p>", rn - show);
+            }
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</fieldset>");
+
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<p style='color:#888;font-size:0.85em;text-align:center'>"
+            "Page auto-refreshes every 10 seconds</p>"
+            "<br><a href='/' class='btn'>Main Menu</a>");
+
+        http_send_page(client_fd, body, (size_t)pos);
 
     /* ============ JSON API ============ */
     } else if (strcmp(req.path, "/api/status") == 0) {

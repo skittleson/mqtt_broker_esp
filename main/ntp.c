@@ -77,7 +77,8 @@ static char     s_upstreams[NTP_UPSTREAMS_MAX][NTP_UPSTREAM_MAX_LEN];
 typedef struct {
     uint32_t addr;          /* sin_addr.s_addr (NBO); 0 == free */
     int64_t  last_ms;       /* esp_timer-ms when last_seen */
-    uint8_t  count;         /* requests in the current window */
+    uint8_t  count;         /* requests in the current window (rate limit) */
+    uint32_t total;         /* lifetime responses to this source */
 } ntp_rate_entry_t;
 
 static ntp_rate_entry_t s_rate[NTP_RATE_LRU_SIZE];
@@ -351,6 +352,7 @@ static bool ntp_rate_allow(uint32_t addr)
                 return false;
             }
             e->count++;
+            e->total++;
             e->last_ms = now_ms;
             return true;
         }
@@ -363,8 +365,27 @@ static bool ntp_rate_allow(uint32_t addr)
     int slot = (free_i >= 0) ? free_i : oldest_i;
     s_rate[slot].addr    = addr;
     s_rate[slot].count   = 1;
+    /* total resets on eviction -- the slot now belongs to a new source.
+     * Right semantics for the recent-clients table: we track 'this
+     * conversation', not 'forever'. */
+    s_rate[slot].total   = 1;
     s_rate[slot].last_ms = now_ms;
     return true;
+}
+
+int ntp_get_recent_clients(ntp_recent_client_t *out, int max_out)
+{
+    if (!out || max_out <= 0) return 0;
+    int n = 0;
+    for (int i = 0; i < NTP_RATE_LRU_SIZE && n < max_out; i++) {
+        if (s_rate[i].addr == 0) continue;
+        out[n].addr    = s_rate[i].addr;
+        /* Convert ms to us for consistency with our other timestamps. */
+        out[n].last_us = s_rate[i].last_ms * 1000;
+        out[n].total   = s_rate[i].total;
+        n++;
+    }
+    return n;
 }
 
 /* Reference identifier for our server responses. RFC 4330 §4:

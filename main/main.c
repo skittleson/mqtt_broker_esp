@@ -249,7 +249,16 @@ void app_main(void)
                 mdns_instance_name_set("ESP32 MQTT Broker");
                 mdns_service_add(NULL, "_mqtt", "_tcp", 1883, NULL, 0);
                 mdns_service_add(NULL, "_http", "_tcp", 80,   NULL, 0);
-                ESP_LOGI(TAG, "mDNS started: %s.local", host);
+                /* SNTP service advertisement (Phase 3 of plan-ntp-server.md).
+                 * Substitutes for DHCP option 42 which ESP-IDF's DHCP server
+                 * doesn't expose for arbitrary option codes -- it only emits
+                 * router and DNS from the dhcps_offer_option enum. mDNS
+                 * advertising _ntp._udp gets the same auto-discovery on
+                 * Avahi-aware clients (macOS, iOS, ChromeOS, Linux). For
+                 * Windows / dumb embedded clients the user still needs to
+                 * point the NTP source at <hostname>.local or the IP. */
+                mdns_service_add(NULL, "_ntp",  "_udp", 123,  NULL, 0);
+                ESP_LOGI(TAG, "mDNS started: %s.local (mqtt/http/ntp)", host);
             } else {
                 ESP_LOGW(TAG, "mdns_init failed: %s", esp_err_to_name(mret));
             }
