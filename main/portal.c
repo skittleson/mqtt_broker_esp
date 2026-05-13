@@ -418,6 +418,124 @@ static int http_send_redirect(int fd, const char *url)
     return http_send_body(fd, body, len);
 }
 
+/*
+ * Reboot-countdown page.
+ *
+ * Sent right before the device intentionally goes away (manual reboot, OTA
+ * upload success, OTA URL success, OTA rollback). Replaces the old
+ * "Rebooting..." plain page that dumped the user on a broken socket and
+ * forced them to manually re-navigate.
+ *
+ * The page polls /api/status every 1s with cache:'no-store' and tracks
+ * three signals:
+ *   1. The first request that fails or times out  -> the device went down.
+ *      We only believe "back online" responses that come AFTER this edge,
+ *      so a response that arrives before the reboot starts is ignored.
+ *   2. uptime_s coming back smaller than the baseline reading -> definite
+ *      fresh boot, even if (1) was missed (e.g. very fast reboot).
+ *   3. A successful response after (1) or (2) -> safe to show the green
+ *      "Back online" pill and link the user to `return_path`.
+ *
+ * Falls back to `<noscript><meta http-equiv='refresh' content='15;url=...'>`
+ * for JS-disabled clients.
+ *
+ * Total page weight: ~2.2 KB (inline CSS + JS). Stored on the heap-allocated
+ * page buffer the caller already owns; this helper never allocates itself.
+ */
+static int http_send_reboot_countdown(int fd,
+                                      const char *title,
+                                      const char *subtitle,
+                                      const char *return_path)
+{
+    /* 4 KB is plenty for the page; we don't want to grow stack here. */
+    char *body = (char *)malloc(4096);
+    if (!body) return -1;
+
+    int len = snprintf(body, 4096,
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>%s</title>"
+        "<noscript><meta http-equiv='refresh' content='15;url=%s'></noscript>"
+        "<style>"
+        "body{margin:0;padding:40px 20px;font-family:verdana,sans-serif;"
+        "background:#252525;color:#eaeaea;text-align:center}"
+        ".card{display:inline-block;min-width:300px;max-width:480px;"
+        "background:#1f1f1f;border:1px solid #555;border-radius:6px;padding:24px}"
+        "h2{margin:0 0 4px;color:#1fa3ec;font-size:1.3em}"
+        "p{margin:0.4em 0;color:#ccc}"
+        ".sub{font-size:0.9em;color:#aaa}"
+        ".elapsed{font-family:monospace;font-size:0.85em;color:#888;margin-top:14px}"
+        ".dot{display:inline-block;width:10px;height:10px;border-radius:50%%;"
+        "background:#e65100;margin-right:8px;vertical-align:-1px;"
+        "animation:pulse 1s infinite}"
+        ".dot.ok{background:#47c266;animation:none}"
+        "@keyframes pulse{0%%,100%%{opacity:1}50%%{opacity:.35}}"
+        ".btn{display:inline-block;margin-top:16px;padding:10px 18px;"
+        "background:#47c266;color:#fff;border-radius:0.3rem;text-decoration:none;"
+        "font-size:1.05em}"
+        ".btn:hover{background:#2d9e46;color:#fff}"
+        ".btn.hidden{display:none}"
+        ".bar{background:#444;height:4px;border-radius:2px;margin-top:14px;overflow:hidden}"
+        ".bar>div{height:100%%;width:0;background:#1fa3ec;transition:width .3s}"
+        "</style></head><body>"
+        "<div class='card'>"
+        "<h2>%s</h2>"
+        "<p class='sub'>%s</p>"
+        "<p id='state'><span class='dot' id='dot'></span><span id='msg'>Waiting for device...</span></p>"
+        "<div class='bar'><div id='bar'></div></div>"
+        "<p class='elapsed' id='elapsed'>0s elapsed</p>"
+        "<a id='go' class='btn hidden' href='%s'>Continue \xe2\x86\x92</a>"
+        "</div>"
+        "<script>(function(){"
+        /* Track the offline edge and uptime baseline so we don't falsely
+         * claim "back online" from the pre-reboot in-flight response. */
+        "var seenOffline=false,baselineUptime=null,start=Date.now();"
+        "var msg=document.getElementById('msg'),dot=document.getElementById('dot');"
+        "var go=document.getElementById('go'),bar=document.getElementById('bar');"
+        "var elapsed=document.getElementById('elapsed');"
+        "var done=false;"
+        "function setProgress(){"
+        "var s=Math.floor((Date.now()-start)/1000);"
+        "elapsed.textContent=s+'s elapsed';"
+        /* Expect ~8-15s typical reboot. Cap visual fill at 90 percent until
+         * we've actually seen it come back. */
+        "if(!done){bar.style.width=Math.min(90,s*7)+'%%';}"
+        "}"
+        "function backOnline(){if(done)return;done=true;"
+        "bar.style.width='100%%';dot.className='dot ok';"
+        "msg.textContent='Back online';go.classList.remove('hidden');"
+        "setTimeout(function(){window.location.href=go.href;},800);}"
+        "function tick(){setProgress();"
+        "var ctrl=('AbortController' in window)?new AbortController():null;"
+        "var to=setTimeout(function(){if(ctrl)ctrl.abort();},1500);"
+        "fetch('/api/status',{cache:'no-store',signal:ctrl?ctrl.signal:undefined})"
+        ".then(function(r){return r.ok?r.json():Promise.reject(r.status);})"
+        ".then(function(d){clearTimeout(to);"
+        "var up=d&&d.system&&typeof d.system.uptime_s==='number'?d.system.uptime_s:null;"
+        "if(baselineUptime===null&&up!==null){baselineUptime=up;}"
+        "if(seenOffline||(up!==null&&baselineUptime!==null&&up<baselineUptime)){"
+        "backOnline();return;}"
+        "msg.textContent='Device still up, waiting for reboot...';"
+        "})"
+        ".catch(function(){clearTimeout(to);seenOffline=true;"
+        "msg.textContent='Device offline, will resume when it returns...';});"
+        "if(!done)setTimeout(tick,1000);}"
+        /* Tiny initial delay so the very first poll doesn't race the
+         * 800ms vTaskDelay before esp_restart(). */
+        "setTimeout(tick,400);"
+        "})();</script>"
+        "</body></html>",
+        title, return_path,
+        title, subtitle, return_path);
+
+    if (len < 0 || len >= 4096) { free(body); return -1; }
+
+    int rc = http_response_start(fd, "200 OK", "text/html; charset=utf-8", (size_t)len);
+    if (rc == 0) rc = http_send_body(fd, body, (size_t)len);
+    free(body);
+    return rc;
+}
+
 static void http_send_page(int fd, const char *body_content, size_t body_len)
 {
     static const char *hdr =
@@ -801,23 +919,13 @@ static void handle_ota_url(int client_fd, const char *url)
 
     ESP_LOGI(TAG, "OTA URL success: %zu bytes from %s", total, url);
 
-    /* Send redirect page then reboot */
-    #define PAGE_BUF_SIZE_OTA 512
-    char *page = (char *)malloc(PAGE_BUF_SIZE_OTA);
-    if (page) {
-        int len = snprintf(page, PAGE_BUF_SIZE_OTA,
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<title>OTA Complete</title></head>"
-            "<body style='font-family:sans-serif;padding:40px;text-align:center;"
-            "background:#252525;color:#eaeaea'>"
-            "<h2>Firmware Updated!</h2>"
-            "<p>Downloaded %zu bytes. Rebooting...</p>"
-            "<p>Reconnect in a few seconds.</p>"
-            "</body></html>", total);
-        http_response_start(client_fd, "200 OK", "text/html; charset=utf-8", len);
-        http_send_body(client_fd, page, len);
-        free(page);
-    }
+    /* Reboot-countdown page; subtitle includes byte count so users can
+     * cross-check against the expected firmware size before the device
+     * disappears. */
+    char subtitle[96];
+    snprintf(subtitle, sizeof(subtitle),
+             "Downloaded %zu bytes. Booting new firmware...", total);
+    http_send_reboot_countdown(client_fd, "Firmware updated", subtitle, "/");
     close(client_fd);
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
@@ -1630,17 +1738,30 @@ static void handle_http_client(int client_fd)
         portal_reconnect_wifi();
         http_send_redirect(client_fd, "/");
 
+    /* ============ REBOOTING VIEW ============
+     * Read-only view of the reboot countdown page. Does NOT trigger a reboot;
+     * just shows the polling UI so OTA flows can redirect to it immediately
+     * once they know the device is going down. If the device has actually
+     * already come back when the user lands here, /api/status will succeed,
+     * we'll never observe the offline edge, and the page will stay in
+     * 'Device still up, waiting for reboot...' until the user navigates away. */
+    } else if (strcmp(req.path, "/rebooting") == 0) {
+        http_send_reboot_countdown(client_fd,
+            "Device rebooting",
+            "Waiting for the device to come back online.",
+            "/");
+        /* Fall through to normal cleanup -- no esp_restart here. */
+
     /* ============ REBOOT ============ */
     } else if (strcmp(req.path, "/reboot") == 0) {
-        int len = snprintf(body, PAGE_BUF_SIZE,
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<title>Rebooting</title></head>"
-            "<body style='font-family:sans-serif;padding:40px;text-align:center'>"
-            "<h2>Rebooting...</h2>"
-            "<p>The device will restart. Reconnect in a few seconds.</p>"
-            "</body></html>");
-        http_response_start(client_fd, "200 OK", "text/html; charset=utf-8", len);
-        http_send_body(client_fd, body, len);
+        /* Reboot countdown page (shared helper). Polls /api/status every 1s
+         * and replaces itself with a green 'Back online' link as soon as the
+         * device returns. Previously this dumped the user on a broken page
+         * with no indication of when it would be safe to retry. */
+        http_send_reboot_countdown(client_fd,
+            "Rebooting",
+            "The device is restarting. This usually takes 5-10 seconds.",
+            "/");
         free(body);
         close(client_fd);
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -1943,8 +2064,12 @@ static void handle_http_client(int client_fd)
             "x.onload=function(){"
             "if(x.status==200){"
             "document.getElementById('fwprog').innerHTML="
-            "\"<div class='st ok'>Upload complete! Rebooting...</div>\";"
-            "setTimeout(function(){location.href='/';},10000);"
+            "\"<div class='st ok'>Upload complete! Switching to reboot view...</div>\";"
+            /* Redirect to the standalone countdown page immediately. The
+             * device started restarting the moment it sent us 200; the
+             * countdown page polls /api/status and swaps itself for a
+             * 'Back online' link as soon as the new firmware answers. */
+            "location.href='/rebooting';"
             "}else{"
             "document.getElementById('fwprog').innerHTML="
             "\"<div class='st warn'>Upload failed: \"+x.responseText+\"</div>\";"
@@ -2075,18 +2200,13 @@ static void handle_http_client(int client_fd)
             } else {
                 ESP_LOGW(TAG, "OTA rollback to %s (%s) on user request",
                          other->label, other_desc.version);
-                int len = snprintf(body, PAGE_BUF_SIZE,
-                    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                    "<title>Rolling back</title>"
-                    "<meta http-equiv='refresh' content='12;url=/'></head>"
-                    "<body style='font-family:sans-serif;padding:40px;text-align:center;"
-                    "background:#252525;color:#eaeaea'>"
-                    "<h2>Rolling back to %s</h2>"
-                    "<p>Rebooting into the previous firmware. Reconnect in a few seconds.</p>"
-                    "</body></html>",
-                    other_desc.version);
-                http_response_start(client_fd, "200 OK", "text/html; charset=utf-8", len);
-                http_send_body(client_fd, body, len);
+                char rb_title[48], rb_subtitle[96];
+                snprintf(rb_title, sizeof(rb_title),
+                         "Rolling back to %.32s", other_desc.version);
+                snprintf(rb_subtitle, sizeof(rb_subtitle),
+                         "Switching boot partition to %.16s. Reconnect in a few seconds.",
+                         other->label);
+                http_send_reboot_countdown(client_fd, rb_title, rb_subtitle, "/");
                 free(body);
                 close(client_fd);
                 vTaskDelay(pdMS_TO_TICKS(800));
