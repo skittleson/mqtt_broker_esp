@@ -7,7 +7,9 @@
  * Supports:
  *   - 100 concurrent clients
  *   - 2048 total subscriptions (255+ unique topics)
- *   - QoS 0
+ *   - QoS 0 outbound; QoS 0 + QoS 1 inbound (QoS 1 publishes are PUBACK'd
+ *     to the publisher and fanned out at QoS 0 — a spec-compliant downgrade).
+ *     QoS 2 not yet supported (publishes silently dropped, publisher retries).
  *   - Wildcard topic matching (+ and #)
  *   - Keep-alive enforcement
  *   - Retained messages (1-week TTL, memory-capped)
@@ -855,20 +857,33 @@ static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)
         return;
     }
 
-    /* We only support QoS 0 — ignore higher QoS publishes */
-    if (pub.qos > 0) {
-        ESP_LOGW(TAG, "QoS %d PUBLISH from client %d ignored (QoS 0 only)", pub.qos, idx);
+    /* QoS 2 is not yet supported. Drop silently — publisher will retry with
+     * DUP=1. This preserves pre-QoS-1 behaviour for any rare QoS 2 client. */
+    if (pub.qos == 2) {
+        ESP_LOGW(TAG, "QoS 2 PUBLISH from client %d dropped (not yet supported)", idx);
         return;
     }
 
     /* Count accepted PUBLISH packets per client (for /clients page stats). */
     c->published++;
 
-    ESP_LOGD(TAG, "PUB '%s' (%lu bytes) from client %d",
-             pub.topic, (unsigned long)pub.payload_len, idx);
+    ESP_LOGD(TAG, "PUB qos=%d '%s' (%lu bytes) from client %d",
+             pub.qos, pub.topic, (unsigned long)pub.payload_len, idx);
 
+    /* Fanout at QoS 0 to subscribers (spec-compliant downgrade; granted in
+     * SUBACK). Future phase 3 will deliver at min(pub.qos, sub.qos). */
     handle_publish_internal(pub.topic, pub.topic_len,
                             pub.payload, pub.payload_len, pub.retain);
+
+    /* QoS 1: acknowledge after fanout has been attempted. We send PUBACK
+     * unconditionally once fanout has run — the MQTT 3.1.1 spec only requires
+     * that we have accepted ownership of the message [MQTT-4.3.2-2], not that
+     * every subscriber received it. */
+    if (pub.qos == 1) {
+        uint8_t ack[4];
+        mqtt_build_puback(ack, pub.packet_id);
+        client_send(idx, ack, 4);
+    }
 
     s_clients[idx].last_activity = get_time_ms();
 }
@@ -935,6 +950,16 @@ static void process_client_data(int idx)
             case 0xE0:  /* DISCONNECT */
                 handle_disconnect(idx);
                 return;  /* client is gone */
+            case 0x40:  /* PUBACK */
+            case 0x50:  /* PUBREC */
+            case 0x60:  /* PUBREL (top nibble — flags ignored here) */
+            case 0x70:  /* PUBCOMP */
+                /* Phase 2: broker fan-out is QoS 0 only, so clients should
+                 * never send these to us. If a misbehaving client does,
+                 * silently consume the frame instead of disconnecting them. */
+                ESP_LOGD(TAG, "Ignoring unsolicited ack 0x%02X from client %d",
+                         pkt_type, idx);
+                break;
             default:
                 ESP_LOGW(TAG, "Unsupported packet type 0x%02X from client %d",
                          pkt_type, idx);

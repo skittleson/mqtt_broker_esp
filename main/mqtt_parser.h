@@ -15,6 +15,9 @@
 #define MQTT_PKT_CONNACK      0x20
 #define MQTT_PKT_PUBLISH      0x30
 #define MQTT_PKT_PUBACK       0x40
+#define MQTT_PKT_PUBREC       0x50
+#define MQTT_PKT_PUBREL       0x62  /* flags 0010 required by spec [MQTT-3.6.1-1] */
+#define MQTT_PKT_PUBCOMP      0x70
 #define MQTT_PKT_SUBSCRIBE    0x82
 #define MQTT_PKT_SUBACK       0x90
 #define MQTT_PKT_UNSUBSCRIBE  0xA2
@@ -139,6 +142,13 @@ int mqtt_parse_unsubscribe(const uint8_t *pkt, size_t pkt_len, mqtt_unsubscribe_
 /* Parse a PUBLISH packet. Returns 0 on success, -1 on error. */
 int mqtt_parse_publish(const uint8_t *pkt, size_t pkt_len, mqtt_publish_t *out);
 
+/**
+ * Parse a 2-byte-packet-id ack frame (PUBACK / PUBREC / PUBREL / PUBCOMP).
+ * Returns 0 on success and writes the packet id; -1 on malformed.
+ * Caller should check the type byte itself.
+ */
+int mqtt_parse_ack(const uint8_t *pkt, size_t pkt_len, uint16_t *packet_id);
+
 /* ---- Packet builders ---- */
 
 /* Build CONNACK. Returns bytes written to buf. buf must be >= 4 bytes. */
@@ -150,6 +160,30 @@ int mqtt_build_suback(uint8_t *buf, uint16_t packet_id,
 
 /* Build UNSUBACK. Returns bytes written (always 4). */
 int mqtt_build_unsuback(uint8_t *buf, uint16_t packet_id);
+
+/**
+ * Build a PUBACK frame for an inbound QoS-1 PUBLISH.
+ * buf must be >= 4 bytes. Returns 4.
+ */
+int mqtt_build_puback(uint8_t *buf, uint16_t packet_id);
+
+/**
+ * Build a PUBREC frame (first ack in QoS-2 inbound). buf must be >= 4 bytes.
+ * Not yet used; provided for phase-5 QoS 2 work. Returns 4.
+ */
+int mqtt_build_pubrec(uint8_t *buf, uint16_t packet_id);
+
+/**
+ * Build a PUBREL frame (second step in QoS-2 outbound). buf must be >= 4 bytes.
+ * Uses required flags 0010 per [MQTT-3.6.1-1]. Returns 4.
+ */
+int mqtt_build_pubrel(uint8_t *buf, uint16_t packet_id);
+
+/**
+ * Build a PUBCOMP frame (final ack in QoS-2 inbound). buf must be >= 4 bytes.
+ * Returns 4.
+ */
+int mqtt_build_pubcomp(uint8_t *buf, uint16_t packet_id);
 
 /* Build PINGRESP. Returns bytes written (always 2). */
 int mqtt_build_pingresp(uint8_t *buf);

@@ -284,6 +284,24 @@ int mqtt_parse_unsubscribe(const uint8_t *pkt, size_t pkt_len, mqtt_unsubscribe_
     return 0;
 }
 
+/* ---------- Parse 2-byte-id ack frames (PUBACK/PUBREC/PUBREL/PUBCOMP) ---------- */
+
+int mqtt_parse_ack(const uint8_t *pkt, size_t pkt_len, uint16_t *packet_id)
+{
+    if (pkt_len < 4) return -1;
+
+    uint32_t remaining;
+    int rl_bytes = mqtt_decode_remaining_length(pkt + 1, pkt_len - 1, &remaining);
+    if (rl_bytes <= 0) return -1;
+    if (remaining < 2) return -1;
+
+    size_t hdr_len = 1 + (size_t)rl_bytes;
+    if (pkt_len < hdr_len + 2) return -1;
+
+    *packet_id = read_u16(pkt + hdr_len);
+    return 0;
+}
+
 /* ---------- Parse PUBLISH ---------- */
 
 int mqtt_parse_publish(const uint8_t *pkt, size_t pkt_len, mqtt_publish_t *out)
@@ -363,6 +381,41 @@ int mqtt_build_unsuback(uint8_t *buf, uint16_t packet_id)
     buf[1] = 0x02;  /* remaining length = 2 */
     write_u16(buf + 2, packet_id);
     return 4;
+}
+
+/* All four QoS ack frames have an identical wire layout:
+ *   byte 0: type<<4 (+ required flags for PUBREL)
+ *   byte 1: 0x02 remaining-length
+ *   bytes 2-3: packet identifier (big-endian)
+ */
+static int build_ack(uint8_t *buf, uint8_t type_byte, uint16_t packet_id)
+{
+    buf[0] = type_byte;
+    buf[1] = 0x02;
+    write_u16(buf + 2, packet_id);
+    return 4;
+}
+
+int mqtt_build_puback(uint8_t *buf, uint16_t packet_id)
+{
+    return build_ack(buf, MQTT_PKT_PUBACK, packet_id);
+}
+
+int mqtt_build_pubrec(uint8_t *buf, uint16_t packet_id)
+{
+    return build_ack(buf, MQTT_PKT_PUBREC, packet_id);
+}
+
+int mqtt_build_pubrel(uint8_t *buf, uint16_t packet_id)
+{
+    /* PUBREL fixed-header flags MUST be 0010 per [MQTT-3.6.1-1].
+     * MQTT_PKT_PUBREL already includes those flag bits (0x62). */
+    return build_ack(buf, MQTT_PKT_PUBREL, packet_id);
+}
+
+int mqtt_build_pubcomp(uint8_t *buf, uint16_t packet_id)
+{
+    return build_ack(buf, MQTT_PKT_PUBCOMP, packet_id);
 }
 
 int mqtt_build_pingresp(uint8_t *buf)

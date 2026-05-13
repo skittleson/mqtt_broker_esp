@@ -995,11 +995,87 @@ def test_unsubscribe():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 16: Firmware Version in API
+#  TEST 16: QoS 1 Inbound (PUBACK round-trip + downgraded fanout)
+# ══════════════════════════════════════════════════════════════
+
+def test_qos1_inbound():
+    section("16. QoS 1 Inbound (PUBACK + downgraded fanout)")
+
+    received = []
+    lock = threading.Lock()
+
+    def on_msg(client, userdata, msg):
+        with lock:
+            received.append((msg.topic, msg.payload, msg.qos))
+
+    sub = make_client("test-qos1-sub", on_message=on_msg)
+    pub = make_client("test-qos1-pub")
+
+    # Subscribe with QoS 1 — broker may grant 0 (downgrade is spec-compliant).
+    sub_rc, _mid = sub.subscribe("test/qos1/#", qos=1)
+    if sub_rc != mqtt.MQTT_ERR_SUCCESS:
+        fail(f"SUBSCRIBE qos=1 failed: rc={sub_rc}")
+        cleanup(sub, pub)
+        return
+    ok("SUBSCRIBE qos=1 accepted")
+    time.sleep(0.3)
+
+    # Publish QoS 1 — paho's wait_for_publish() blocks until PUBACK arrives.
+    # If broker doesn't send PUBACK, is_published() stays False after timeout.
+    info = pub.publish("test/qos1/hello", b"hello-qos1", qos=1)
+    try:
+        info.wait_for_publish(timeout=5)
+    except Exception as e:
+        fail(f"wait_for_publish raised: {e}")
+        cleanup(sub, pub)
+        return
+
+    if info.is_published():
+        ok("Broker sent PUBACK for QoS 1 PUBLISH")
+    else:
+        fail("No PUBACK received within 5s (QoS 1 inbound broken)")
+        cleanup(sub, pub)
+        return
+
+    # Verify fanout still happened (subscriber should see the message).
+    time.sleep(0.5)
+    with lock:
+        msgs = list(received)
+    if any(t == "test/qos1/hello" and p == b"hello-qos1" for t, p, _q in msgs):
+        ok("Subscriber received the QoS 1 message (fanned out at downgraded QoS)")
+    else:
+        fail(f"Subscriber missed the QoS 1 message; received={msgs}")
+
+    # Burst test: 20 QoS 1 publishes, all must be ACK'd and delivered.
+    received.clear()
+    infos = []
+    for i in range(20):
+        infos.append(pub.publish("test/qos1/burst", f"m{i}".encode(), qos=1))
+    for i, info in enumerate(infos):
+        info.wait_for_publish(timeout=5)
+        if not info.is_published():
+            fail(f"PUBACK missing for burst message #{i}")
+            cleanup(sub, pub)
+            return
+    ok("All 20 QoS 1 publishes acknowledged")
+
+    time.sleep(1.0)
+    with lock:
+        burst_count = sum(1 for t, _p, _q in received if t == "test/qos1/burst")
+    if burst_count == 20:
+        ok(f"All 20 burst messages delivered to subscriber ({burst_count}/20)")
+    else:
+        fail(f"Only {burst_count}/20 burst messages delivered")
+
+    cleanup(sub, pub)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TEST 17: Firmware Version in API
 # ══════════════════════════════════════════════════════════════
 
 def test_firmware_version():
-    section("16. Firmware Version in API")
+    section("17. Firmware Version in API")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1044,11 +1120,11 @@ def test_firmware_version():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 17: Firmware Update Page
+#  TEST 18: Firmware Update Page
 # ══════════════════════════════════════════════════════════════
 
 def test_firmware_update_page():
-    section("17. Firmware Update Page")
+    section("18. Firmware Update Page")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1094,11 +1170,11 @@ def test_firmware_update_page():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 18: Connected Clients Page and API
+#  TEST 19: Connected Clients Page and API
 # ══════════════════════════════════════════════════════════════
 
 def test_connected_clients():
-    section("18. Connected Clients Page and API")
+    section("19. Connected Clients Page and API")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1234,11 +1310,11 @@ def test_connected_clients():
 
 
 # ══════════════════════════════════════════════════════════════
-#  TEST 19: Version in Dashboard and Footer
+#  TEST 20: Version in Dashboard and Footer
 # ══════════════════════════════════════════════════════════════
 
 def test_version_display():
-    section("19. Version in Information Page and Footer")
+    section("20. Version in Information Page and Footer")
 
     if requests is None:
         skip("'requests' module not installed")
@@ -1339,6 +1415,7 @@ def main():
     test_keepalive()
     test_many_topics()
     test_unsubscribe()
+    test_qos1_inbound()
     test_portal_api()
     test_portal_pages()
     test_portal_save_settings()
