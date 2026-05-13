@@ -24,7 +24,7 @@
   <img src="https://img.shields.io/badge/ESP--IDF-v5.5-blue?style=flat-square" alt="ESP-IDF v5.5" />
   <img src="https://img.shields.io/badge/MQTT-3.1.1-orange?style=flat-square" alt="MQTT 3.1.1" />
   <img src="https://img.shields.io/badge/Clients-100_max-green?style=flat-square" alt="100 clients" />
-  <img src="https://img.shields.io/badge/QoS-0-yellow?style=flat-square" alt="QoS 0" />
+  <img src="https://img.shields.io/badge/QoS-0%20%2F%201-green?style=flat-square" alt="QoS 0 / 1" />
   <img src="https://img.shields.io/badge/Language-C-lightgrey?style=flat-square" alt="C" />
   <img src="https://img.shields.io/badge/License-MIT-brightgreen?style=flat-square" alt="MIT License" />
 </p>
@@ -61,7 +61,8 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 
 | Category              | Details                                                                                                  |
 | --------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Protocol**          | Full MQTT 3.1.1 — CONNECT, SUBSCRIBE, PUBLISH, UNSUBSCRIBE, PINGREQ, DISCONNECT                          |
+| **Protocol**          | Full MQTT 3.1.1 — CONNECT, SUBSCRIBE, PUBLISH, PUBACK, UNSUBSCRIBE, PINGREQ, DISCONNECT                  |
+| **QoS**               | QoS 0 and QoS 1 in both directions. Per-subscriber delivery QoS = min(publisher, granted). QoS 2 not yet implemented (inbound dropped, outbound never selected). |
 | **Clients**           | 100 concurrent connections, pre-allocated in PSRAM                                                       |
 | **Subscriptions**     | 2,048 total entries across all clients                                                                   |
 | **Wildcards**         | `+` (single-level), `#` (multi-level), `$`-topic protection                                              |
@@ -191,6 +192,8 @@ curl http://192.168.x.x/api/clients
       "connected_s": 3600,
       "last_active_s": 2,
       "subs": 3,
+      "inflight": 0,
+      "published": 142,
       "keep_alive": 60
     },
     {
@@ -199,6 +202,8 @@ curl http://192.168.x.x/api/clients
       "connected_s": 7200,
       "last_active_s": 0,
       "subs": 1,
+      "inflight": 2,
+      "published": 47,
       "keep_alive": 30
     }
   ],
@@ -314,7 +319,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting               | Default         | File                                         |
 | --------------------- | --------------- | -------------------------------------------- |
-| Firmware version      | 0.2.1           | `version.h`                                  |
+| Firmware version      | 0.5.0           | `version.h`                                  |
 | Default hostname      | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`) |
 | Max clients           | 100             | `mqtt_broker.h`                              |
 | Max subscriptions     | 2,048           | `mqtt_broker.h`                              |
@@ -322,6 +327,10 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 | Keepalive grace       | 10 seconds      | `mqtt_broker.h`                              |
 | Max retained msg size | 64 KB           | `mqtt_broker.h`                              |
 | Retain memory cap     | 80% PSRAM       | `mqtt_broker.h`                              |
+| QoS-1 in-flight / client | 20 msgs      | `mqtt_broker.h` (`BROKER_INFLIGHT_PER_CLIENT_MAX`) |
+| QoS-1 in-flight total cap | 2 MB         | `mqtt_broker.h` (`BROKER_INFLIGHT_TOTAL_BYTES_MAX`) |
+| QoS-1 retry initial   | 15 s            | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_INITIAL_MS`) |
+| QoS-1 retry max       | 5 attempts      | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_MAX`) |
 | Default WiFi SSID     | _(empty)_       | `wifi_connect.h`                             |
 | AP IP Address         | `192.168.25.1`  | `Kconfig.projbuild`                          |
 | AP Netmask            | `255.255.255.0` | `Kconfig.projbuild`                          |
@@ -401,6 +410,7 @@ app_main()
               ├── Allocate clients[] from PSRAM (100 × struct)
               ├── Allocate per-client recv buffers from PSRAM
               ├── Allocate subs[] from PSRAM (2048 × struct)
+              ├── Allocate inflight[100][20] from PSRAM (QoS-1 tracking)
               ├── Allocate send buffer from PSRAM
               ├── Bind TCP socket on port 1883
               └── select() loop
@@ -413,14 +423,47 @@ app_main()
 
 ### Memory Layout (8 MB PSRAM)
 
-| Allocation        | Size            | Notes                                      |
-| ----------------- | --------------- | ------------------------------------------ |
-| Client structs    | ~10 KB          | 100 × broker_client_t (without recv buf)   |
-| Recv buffers      | 1,600 KB        | 100 × 16 KB (configurable)                 |
-| Subscription pool | 280 KB          | 2,048 × broker_sub_t                       |
-| Send buffer       | 16 KB           | Shared, configurable                       |
-| Retained messages | Up to ~5,120 KB | 80% of remaining PSRAM                     |
-| **Free heap**     | ~6,300 KB       | Available for retained store + general use |
+| Allocation             | Size            | Notes                                                       |
+| ---------------------- | --------------- | ----------------------------------------------------------- |
+| Client structs         | ~10 KB          | 100 × broker_client_t (without recv buf)                    |
+| Recv buffers           | 1,600 KB        | 100 × 16 KB (configurable)                                  |
+| Subscription pool      | 280 KB          | 2,048 × broker_sub_t                                        |
+| Send buffer            | 16 KB           | Shared, configurable                                        |
+| QoS-1 in-flight slots  | ~96 KB          | 100 × 20 × broker_inflight_t (headers only; payloads on-demand) |
+| QoS-1 in-flight bytes  | up to 2 MB      | Dynamic topic+payload allocs, cap enforced; overflow degrades to QoS 0 |
+| Retained messages      | Up to ~5,120 KB | 80% of remaining PSRAM                                      |
+| **Free heap**          | ~6,250 KB       | Available for retained store + general use                  |
+
+### MQTT QoS
+
+The broker supports QoS 0 and QoS 1 in both directions. Delivery to a
+subscriber is at `min(publisher_qos, granted_qos)` per [MQTT-3.3.1-9].
+
+**Inbound QoS 1 (publisher → broker):** the broker accepts the PUBLISH,
+fans it out, then sends a `PUBACK` to the publisher [MQTT-4.3.2-2]. The
+broker takes ownership at PUBACK time — it does not wait for all
+subscribers to receive before acking.
+
+**Outbound QoS 1 (broker → subscriber):** when a subscriber is granted
+QoS 1, every PUBLISH sent to them is held in an in-flight slot until the
+matching PUBACK arrives. If the PUBACK doesn't come in time, the broker
+retransmits with `DUP=1`:
+
+| Setting                  | Default | Notes                                                       |
+| ------------------------ | ------- | ----------------------------------------------------------- |
+| In-flight slots / client | 20      | After 20 unacked messages, further QoS-1 sends to that client degrade to QoS 0 (still delivered) |
+| Global memory cap        | 2 MB    | Total topic+payload bytes across all in-flight messages; overflow also degrades to QoS 0 |
+| First retry              | 15 s    | Time after the original send                                |
+| Retry backoff            | ×2       | 15 s, 30 s, 60 s, 60 s, 60 s                                 |
+| Max retries              | 5       | After which the broker logs and abandons the message        |
+| Persistence              | RAM only | In-flight state is volatile — a broker reboot drops all queues. Subscribers with `clean_session=false` get `session present=0` and must resubscribe. Phase 4 will add PSRAM-resident persistent sessions; flash-backed persistence is intentionally out of scope (10-year device-life goal precludes per-message flash writes). |
+
+The per-client `inflight` count is exposed on the `/clients` page and in
+`GET /api/clients` so you can watch the queue depth in real time.
+
+QoS 2 is **not yet implemented.** Inbound QoS-2 PUBLISH packets are
+silently dropped (the publisher retries with DUP=1, matching pre-QoS-1
+behaviour); SUBACK clamps any requested QoS ≥ 2 down to 1.
 
 ### Source Files
 
@@ -429,7 +472,7 @@ main/
 ├── main.c            Entry point: NVS, WiFi, LED, portal, broker startup
 ├── version.h         Firmware version defines (semver + name)
 ├── mqtt_broker.h     Broker config defines, stats API
-├── mqtt_broker.c     MQTT broker core: select() loop, client/sub management
+├── mqtt_broker.c     MQTT broker core: select() loop, client/sub management, QoS-1 in-flight retry tables
 ├── mqtt_parser.h     MQTT 3.1.1 packet structures and API
 ├── mqtt_parser.c     Packet parser/serializer, topic matching
 ├── portal.h          Captive portal API
@@ -458,7 +501,7 @@ python3 test_broker.py 192.168.1.100 1883
 
 ### Test Coverage
 
-The test suite runs **59 assertions** across 15 test sections:
+The test suite runs **~118 assertions** across 21 test sections:
 
 | #   | Test                     | What it verifies                                             |
 | --- | ------------------------ | ------------------------------------------------------------ |
@@ -477,6 +520,8 @@ The test suite runs **59 assertions** across 15 test sections:
 | 13  | Web Portal Pages         | All pages return 200, unknown paths return 404               |
 | 14  | Portal Settings Save     | POST save, persistence verification, input validation        |
 | 15  | Unsubscribe              | Receives before, silent after unsubscribe                    |
+| 16  | QoS 1 Inbound            | PUBACK round-trip, 20-msg burst all acknowledged + delivered |
+| 17  | QoS 1 Outbound           | SUBACK grants 1, min(pub,granted) per delivery, exactly-once, in-flight settles |
 
 ### Stress Test
 
