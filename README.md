@@ -31,6 +31,11 @@
 
 ---
 
+## What's new in 0.6.3
+
+- **Settings save = confirm + reboot + countdown.** `/settings` and `/config` (WiFi credentials) now end with a green `Save & Reboot` button. Submitting fires a browser `confirm()` dialog with the exact wording of what will happen; on OK the server persists every field to NVS, serves the reboot-countdown page (same JS as `GET /reboot` and `POST /ota-rollback`), and restarts. The user lands on the countdown automatically, watches the offline→online transition, and gets dropped on a working dashboard — no more "saved but unclear which settings need a reboot" guesswork.
+- **`CMAKE_CONFIGURE_DEPENDS` on `main/version.h`.** Bumping `FW_VERSION` now auto-reruns CMake configure, so the OTA image header's `esp_app_desc_t.version` never silently caches the previous value (previously a `touch CMakeLists.txt` was required).
+
 ## What's new in 0.6.2
 
 - **Reboot countdown page** replaces the broken `Rebooting...` dead-end. Whenever the device intentionally goes away (`/reboot`, `/ota-rollback`, OTA upload success, OTA URL success), it returns a standalone page that polls `/api/status` every 1 s, watches for the offline edge so it can't be tricked by a stale in-flight response, and swaps itself for a green `Back online` link the moment the new firmware answers. New read-only `GET /rebooting` endpoint serves the same page without restarting — used by the `/update` upload XHR to redirect users straight to the countdown instead of waiting on a frozen 10-second progress bar.
@@ -351,24 +356,24 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 ### Compile-Time Settings
 
-| Setting                   | Default         | File                                                 |
-| ------------------------- | --------------- | ---------------------------------------------------- |
-| Firmware version          | 0.6.2           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
-| Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)         |
-| Max clients               | 100             | `mqtt_broker.h`                                      |
-| Max subscriptions         | 2,048           | `mqtt_broker.h`                                      |
-| MQTT port                 | 1883            | `mqtt_broker.h`                                      |
-| Keepalive grace           | 10 seconds      | `mqtt_broker.h`                                      |
-| Max retained msg size     | 64 KB           | `mqtt_broker.h`                                      |
-| Retain memory cap         | 80% PSRAM       | `mqtt_broker.h`                                      |
-| QoS-1 in-flight / client  | 20 msgs         | `mqtt_broker.h` (`BROKER_INFLIGHT_PER_CLIENT_MAX`)   |
-| QoS-1 in-flight total cap | 2 MB            | `mqtt_broker.h` (`BROKER_INFLIGHT_TOTAL_BYTES_MAX`)  |
-| QoS-1 retry initial       | 15 s            | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_INITIAL_MS`) |
-| QoS-1 retry max           | 5 attempts      | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_MAX`)        |
-| Default WiFi SSID         | _(empty)_       | `wifi_connect.h`                                     |
-| AP IP Address             | `192.168.25.1`  | `Kconfig.projbuild`                                  |
-| AP Netmask                | `255.255.255.0` | `Kconfig.projbuild`                                  |
-| LED GPIO                  | 21              | `main.c`                                             |
+| Setting                   | Default         | File                                                              |
+| ------------------------- | --------------- | ----------------------------------------------------------------- |
+| Firmware version          | 0.6.3           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
+| Max clients               | 100             | `mqtt_broker.h`                                                   |
+| Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |
+| MQTT port                 | 1883            | `mqtt_broker.h`                                                   |
+| Keepalive grace           | 10 seconds      | `mqtt_broker.h`                                                   |
+| Max retained msg size     | 64 KB           | `mqtt_broker.h`                                                   |
+| Retain memory cap         | 80% PSRAM       | `mqtt_broker.h`                                                   |
+| QoS-1 in-flight / client  | 20 msgs         | `mqtt_broker.h` (`BROKER_INFLIGHT_PER_CLIENT_MAX`)                |
+| QoS-1 in-flight total cap | 2 MB            | `mqtt_broker.h` (`BROKER_INFLIGHT_TOTAL_BYTES_MAX`)               |
+| QoS-1 retry initial       | 15 s            | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_INITIAL_MS`)              |
+| QoS-1 retry max           | 5 attempts      | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_MAX`)                     |
+| Default WiFi SSID         | _(empty)_       | `wifi_connect.h`                                                  |
+| AP IP Address             | `192.168.25.1`  | `Kconfig.projbuild`                                               |
+| AP Netmask                | `255.255.255.0` | `Kconfig.projbuild`                                               |
+| LED GPIO                  | 21              | `main.c`                                                          |
 
 ### Scaling the Client Limit
 
