@@ -31,6 +31,36 @@
 
 ---
 
+## What's new in 0.7.0-rc2 (NTP Phase 2: SNTP server)
+
+The broker is now a complete time source. Any LAN client can point at the
+device and sync from it.
+
+- **UDP :123 SNTPv4 server.** Single FreeRTOS task pinned to CPU 0, static
+  48-byte tx buffer, no malloc in the hot path. Drops oversize (>68 B) and
+  undersize (<48 B) packets silently to defang amplification attacks;
+  rejects mode=6 / mode=7 (control/private). Per-source rate limit:
+  10 req/s, 32-entry LRU.
+- **Stratum / leap handling per RFC 4330.** Pre-sync: stratum 16 + LI=3
+  (alarm), ref_id `"INIT"` — well-behaved clients (chrony, ntpd, w32time,
+  systemd-timesyncd) ignore the source. Post-sync: stratum 3, LI=0,
+  ref_id `"ESP3"`.
+- **`$SYS/broker/ntp/synced`, `/stratum`, `/served`** — retained topics
+  published every 10 s. New MQTT subscribers see the latest values
+  immediately on connect.
+- **Settings page** gets a second status line (`server · serving on UDP:123
+  · stratum 3 · 8 served · dropped 0/2/1`) and an independent
+  `Enable SNTP server` checkbox.
+- **`/api/time`** picks up `server_running`, `stratum`, `served`, and
+  `dropped.{rate,size,mode}` fields. Same auth-exempt path as Phase 1.
+
+Measured against a raw SNTPv4 client from the developer host: **5.6 ms
+RTT, ‘19 ms offset** — well under the plan target of ±50 ms.
+
+Not in this release (Phase 3+): DHCP option 42 advertise-self, `/time`
+portal page with live clock, manual `POST /api/time/set`, drift
+compensation while free-running.
+
 ## What's new in 0.7.0-rc1 (NTP Phase 1: SNTP client)
 
 First slice of [`plan-ntp-server.md`](plan-ntp-server.md). The broker now has
@@ -364,28 +394,29 @@ The update page also shows current firmware information (version, build date, ID
 
 ### All Endpoints
 
-| Path             | Method | Description                                                                                                              |
-| ---------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `/`              | GET    | Main dashboard with live stats                                                                                           |
-| `/clients`       | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh)                                                                |
-| `/settings`      | GET    | Settings form (MQTT, retain, AP)                                                                                         |
-| `/config`        | GET    | WiFi configuration form                                                                                                  |
-| `/update`        | GET    | Firmware update page (upload + URL)                                                                                      |
-| `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)                                                                                |
-| `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`)                                                                    |
-| `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot                                                                   |
-| `/rebooting`     | GET    | Standalone reboot countdown page (read-only, no reboot)                                                                  |
-| `/api/ping`      | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
-| `/api/time`      | GET    | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`. |
-| `/api/time/resync` | POST | Gated. Force an immediate upstream poll. |
-| `/save-settings` | POST   | Save broker/AP settings to NVS                                                                                           |
-| `/save`          | POST   | Save WiFi credentials                                                                                                    |
-| `/clear`         | GET    | Clear saved WiFi credentials                                                                                             |
-| `/reconnect`     | GET    | Reconnect to saved WiFi                                                                                                  |
-| `/ap-toggle`     | GET    | Toggle AP mode                                                                                                           |
-| `/reboot`        | GET    | Reboot the device                                                                                                        |
-| `/api/status`    | GET    | JSON API — broker stats, firmware version                                                                                |
-| `/api/clients`   | GET    | JSON API — connected MQTT + WiFi AP clients                                                                              |
+| Path               | Method | Description                                                                                                              |
+| ------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `/`                | GET    | Main dashboard with live stats                                                                                           |
+| `/clients`         | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh)                                                                |
+| `/settings`        | GET    | Settings form (MQTT, retain, AP)                                                                                         |
+| `/config`          | GET    | WiFi configuration form                                                                                                  |
+| `/update`          | GET    | Firmware update page (upload + URL)                                                                                      |
+| `/ota-upload`      | POST   | OTA firmware upload (multipart/form-data)                                                                                |
+| `/ota-url`         | POST   | OTA firmware fetch from URL (`http://` or `https://`)                                                                    |
+| `/ota-rollback`    | POST   | Switch boot partition to the other OTA slot and reboot                                                                   |
+| `/rebooting`       | GET    | Standalone reboot countdown page (read-only, no reboot)                                                                  |
+| `/api/ping`        | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
+| `/api/time`        | GET    | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.                             |
+| `/api/time/resync` | POST   | Gated. Force an immediate upstream poll.                                                                                 |
+| UDP :123           | —      | SNTPv4 server. Stratum 16/LI=3 (alarm) when unsynced, stratum 3 once synced. Per-source rate limit, anti-amplification.   |
+| `/save-settings`   | POST   | Save broker/AP settings to NVS                                                                                           |
+| `/save`            | POST   | Save WiFi credentials                                                                                                    |
+| `/clear`           | GET    | Clear saved WiFi credentials                                                                                             |
+| `/reconnect`       | GET    | Reconnect to saved WiFi                                                                                                  |
+| `/ap-toggle`       | GET    | Toggle AP mode                                                                                                           |
+| `/reboot`          | GET    | Reboot the device                                                                                                        |
+| `/api/status`      | GET    | JSON API — broker stats, firmware version                                                                                |
+| `/api/clients`     | GET    | JSON API — connected MQTT + WiFi AP clients                                                                              |
 
 ## Configuration
 
@@ -411,7 +442,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                              |
 | ------------------------- | --------------- | ----------------------------------------------------------------- |
-| Firmware version          | 0.7.0-rc1       | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Firmware version          | 0.7.0-rc2       | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
 | Max clients               | 100             | `mqtt_broker.h`                                                   |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |
