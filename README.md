@@ -31,6 +31,17 @@
 
 ---
 
+## What's new in 0.6.0 (UX honesty pass)
+
+- **Dashboard now tells the truth.** Single coherent status pill (`Online · Ethernet 192.168.x.x` / `Online · WiFi <ssid>` / `Setup · AP mode @ <ip>`) replaces the old contradictory stack of an orange "AP mode" warning above a green "Ethernet online" badge.
+- **No more password leaks.** `/information` and `/settings` no longer render the AP password (or MQTT auth password) in the response HTML. Inputs use `unchanged — leave blank to keep` semantics; an empty submission preserves the stored value, so saving NAPT no longer forces you to retype the AP password.
+- **Live `/clients` without the page-reload sledgehammer.** Replaces the destructive `setTimeout(location.reload, 5000)` with in-place `/api/clients` polling every 3 s, a pause button, a `Live · last update HH:MM:SS` indicator, and `visibilitychange`-aware backoff.
+- **Firmware rollback button.** `/update` now lists the other OTA partition's version and exposes a `Roll back & Reboot` button (`POST /ota-rollback`). The current image stays in flash, so the same button bounces you back.
+- **Tester actually works.** Filter input no longer collapses to a 5 px sliver; payload limit raised 256 → 1024 bytes with a live `N/1024` counter; real MQTT 3.1.1 §4.7 wildcard matching (no more substring-stripping lie); QoS 0/1 selector added next to retain.
+- **`/ota-url` accepts `https://`** — previously silently rejected by an HTML5 `pattern` constraint.
+
+Full audit trail with before/after captures: [`CHANGELOG-v0.6.0.md`](CHANGELOG-v0.6.0.md). Roadmap for what's next: [`plan-mqtt-ux-v2.md`](plan-mqtt-ux-v2.md). Regenerate captures from any live device with `PORTAL_URL=http://your.device python3 tools/capture_portal.py`.
+
 ## Why?
 
 Most MQTT setups need a Raspberry Pi, a cloud service, or a dedicated server running Mosquitto. This project puts the entire broker on a $10 microcontroller. It connects to your WiFi, starts accepting MQTT clients on port 1883, and runs a Tasmota-style web UI for configuration. No dependencies, no Docker, no Linux.
@@ -59,27 +70,27 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 
 ## Features
 
-| Category              | Details                                                                                                  |
-| --------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Protocol**          | Full MQTT 3.1.1 — CONNECT, SUBSCRIBE, PUBLISH, PUBACK, UNSUBSCRIBE, PINGREQ, DISCONNECT                  |
+| Category              | Details                                                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Protocol**          | Full MQTT 3.1.1 — CONNECT, SUBSCRIBE, PUBLISH, PUBACK, UNSUBSCRIBE, PINGREQ, DISCONNECT                                                                          |
 | **QoS**               | QoS 0 and QoS 1 in both directions. Per-subscriber delivery QoS = min(publisher, granted). QoS 2 not yet implemented (inbound dropped, outbound never selected). |
-| **Clients**           | 100 concurrent connections, pre-allocated in PSRAM                                                       |
-| **Subscriptions**     | 2,048 total entries across all clients                                                                   |
-| **Wildcards**         | `+` (single-level), `#` (multi-level), `$`-topic protection                                              |
-| **Retained Messages** | Configurable TTL (default 7 days), 64KB max per message, PSRAM-backed with FIFO eviction                 |
-| **Binary Payloads**   | Up to 16KB per message (configurable buffer size) — supports images, protobuf, etc.                      |
-| **Authentication**    | Optional username/password via MQTT CONNECT (CONNACK 0x04 on failure)                                    |
-| **Web Portal**        | Tasmota-style dark theme UI for all settings, live stats, and device info                                |
-| **Client Monitoring** | Live view of connected MQTT clients (ID, IP, uptime, subscriptions) and WiFi AP clients (MAC, RSSI)      |
-| **Firmware Version**  | Semver display (Tasmota-style) on dashboard, footer, and JSON API                                        |
-| **OTA Updates**       | Firmware upload via web UI (file upload) or HTTP URL fetch — dual OTA partitions                         |
-| **JSON API**          | `GET /api/status` returns broker stats, WiFi status, firmware version, and system info                   |
-| **WiFi**              | STA + AP mode, NVS credential persistence, automatic AP fallback                                         |
-| **Ethernet**          | Optional W5500 SPI Ethernet with NAPT bridging (compile-time flag)                                       |
-| **Captive Portal**    | DNS hijack + HTTP server for WiFi configuration on first boot                                            |
-| **mDNS / Bonjour**    | Configurable hostname; reachable as `<hostname>.local`, advertises `_mqtt._tcp:1883` and `_http._tcp:80` |
-| **LED Status**        | WS2812 on GPIO21 — blue (boot), yellow (connecting), green (running), red (failed)                       |
-| **Configuration**     | All settings configurable via web UI, persisted to NVS flash                                             |
+| **Clients**           | 100 concurrent connections, pre-allocated in PSRAM                                                                                                               |
+| **Subscriptions**     | 2,048 total entries across all clients                                                                                                                           |
+| **Wildcards**         | `+` (single-level), `#` (multi-level), `$`-topic protection                                                                                                      |
+| **Retained Messages** | Configurable TTL (default 7 days), 64KB max per message, PSRAM-backed with FIFO eviction                                                                         |
+| **Binary Payloads**   | Up to 16KB per message (configurable buffer size) — supports images, protobuf, etc.                                                                              |
+| **Authentication**    | Optional username/password via MQTT CONNECT (CONNACK 0x04 on failure)                                                                                            |
+| **Web Portal**        | Tasmota-style dark theme UI for all settings, live stats, and device info                                                                                        |
+| **Client Monitoring** | Live view of connected MQTT clients (ID, IP, uptime, subscriptions) and WiFi AP clients (MAC, RSSI)                                                              |
+| **Firmware Version**  | Semver display (Tasmota-style) on dashboard, footer, and JSON API                                                                                                |
+| **OTA Updates**       | Firmware upload via web UI (file upload) or HTTP URL fetch — dual OTA partitions                                                                                 |
+| **JSON API**          | `GET /api/status` returns broker stats, WiFi status, firmware version, and system info                                                                           |
+| **WiFi**              | STA + AP mode, NVS credential persistence, automatic AP fallback                                                                                                 |
+| **Ethernet**          | Optional W5500 SPI Ethernet with NAPT bridging (compile-time flag)                                                                                               |
+| **Captive Portal**    | DNS hijack + HTTP server for WiFi configuration on first boot                                                                                                    |
+| **mDNS / Bonjour**    | Configurable hostname; reachable as `<hostname>.local`, advertises `_mqtt._tcp:1883` and `_http._tcp:80`                                                         |
+| **LED Status**        | WS2812 on GPIO21 — blue (boot), yellow (connecting), green (running), red (failed)                                                                               |
+| **Configuration**     | All settings configurable via web UI, persisted to NVS flash                                                                                                     |
 
 ## Hardware
 
@@ -160,6 +171,18 @@ The broker includes a Tasmota-style web UI accessible at the device's IP address
   <em>Left: Main dashboard with status and navigation. Right: Information page with full device details.</em>
 </p>
 
+> **Refreshing screenshots.** All portal captures in `docs/screenshots/` are
+> generated by `tools/capture_portal.py` (Playwright). Point it at any live
+> device and it will write both the legacy flat images used above and a full
+> desktop + mobile set into `docs/screenshots/ux-audit/`:
+>
+> ```bash
+> PORTAL_URL=http://192.168.22.100 python3 tools/capture_portal.py
+> ```
+>
+> See [`plan-mqtt-ux-v2.md`](plan-mqtt-ux-v2.md) for the current UX audit
+> backed by those captures.
+
 ### Main Dashboard (`/`)
 
 The dashboard shows live broker status at a glance:
@@ -173,9 +196,9 @@ The dashboard shows live broker status at a glance:
 
 ### Connected Clients (`/clients`)
 
-A live view of every device connected to the broker, auto-refreshing every 5 seconds:
+A live view of every device connected to the broker, refreshing **in place** every 3 seconds via `fetch('/api/clients')` (no full-page reload — scroll position, text selection, and any mid-copy state survive). A `pause` button and a visible `Live · last update HH:MM:SS` indicator put the user in control; polling automatically stops when the tab is hidden. A `<noscript>` fallback still does a hard reload for JS-disabled clients.
 
-- **MQTT Clients** — client ID, IP address, connection duration, last activity, subscription count, keep-alive interval
+- **MQTT Clients** — client ID, IP address, connection duration, last activity, subscription count, in-flight count, published count, keep-alive interval
 - **WiFi AP Clients** — MAC address and RSSI signal strength for every device connected to the ESP32's access point
 
 ```bash
@@ -228,22 +251,26 @@ All settings are persisted to NVS flash and survive reboots.
 
 ### Firmware Update (`/update`)
 
-The firmware update page provides two methods for over-the-air (OTA) updates:
+The firmware update page provides three flows for over-the-air (OTA) management:
 
 - **File Upload** — select a `.bin` firmware file from your computer and upload it directly to the device. Includes a progress bar and automatic reboot on success.
-- **URL Fetch** — provide an HTTP URL to a hosted firmware binary. The device downloads and flashes it.
+- **URL Fetch** — provide an `http://` or `https://` URL to a hosted firmware binary. The device downloads and flashes it.
+- **Rollback** — if the *other* OTA partition holds a valid app, the page shows its version and offers a `Roll back & Reboot` button. One click switches `esp_ota_set_boot_partition` back to the previous slot and reboots. The current image stays in flash, so the same button bounces you back. This is manual rollback by design — bootloader auto-rollback is not enabled (it would brick first upgrade without an in-app self-test wired up; that's on the roadmap).
 
-The device uses dual OTA partitions (ota_0 / ota_1) so the running firmware is never overwritten during an update. If an update fails, the previous firmware remains intact.
+The device uses dual OTA partitions (`ota_0` / `ota_1`) so the running firmware is never overwritten during an update. If an update fails to validate, the previous firmware remains intact.
 
 ```bash
-# Upload via curl
+# Upload via curl (takes ~20s for a 1.1 MB image over Ethernet)
 curl -F "firmware=@build/mqtt_broker.bin" http://192.168.x.x/ota-upload
 
-# Or trigger URL-based OTA
+# Or trigger URL-based OTA (http:// or https://)
 curl -X POST -d "url=http://192.168.1.100:8080/mqtt_broker.bin" http://192.168.x.x/ota-url
+
+# Manual rollback to the other partition
+curl -X POST http://192.168.x.x/ota-rollback
 ```
 
-The update page also shows current firmware information: version, build date, IDF version, and running partition.
+The update page also shows current firmware information (version, build date, IDF version, running partition) **and** the other partition's version, so you can see what rollback would restore to before you click.
 
 ### JSON API (`/api/status`)
 
@@ -280,12 +307,13 @@ The update page also shows current firmware information: version, build date, ID
 | Path             | Method | Description                                     |
 | ---------------- | ------ | ----------------------------------------------- |
 | `/`              | GET    | Main dashboard with live stats                  |
-| `/clients`       | GET    | Connected MQTT + WiFi AP clients (auto-refresh) |
+| `/clients`       | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh) |
 | `/settings`      | GET    | Settings form (MQTT, retain, AP)                |
 | `/config`        | GET    | WiFi configuration form                         |
 | `/update`        | GET    | Firmware update page (upload + URL)             |
 | `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)       |
-| `/ota-url`       | POST   | OTA firmware fetch from URL                     |
+| `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`) |
+| `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot |
 | `/save-settings` | POST   | Save broker/AP settings to NVS                  |
 | `/save`          | POST   | Save WiFi credentials                           |
 | `/clear`         | GET    | Clear saved WiFi credentials                    |
@@ -317,24 +345,24 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 ### Compile-Time Settings
 
-| Setting               | Default         | File                                         |
-| --------------------- | --------------- | -------------------------------------------- |
-| Firmware version      | 0.5.0           | `version.h`                                  |
-| Default hostname      | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`) |
-| Max clients           | 100             | `mqtt_broker.h`                              |
-| Max subscriptions     | 2,048           | `mqtt_broker.h`                              |
-| MQTT port             | 1883            | `mqtt_broker.h`                              |
-| Keepalive grace       | 10 seconds      | `mqtt_broker.h`                              |
-| Max retained msg size | 64 KB           | `mqtt_broker.h`                              |
-| Retain memory cap     | 80% PSRAM       | `mqtt_broker.h`                              |
-| QoS-1 in-flight / client | 20 msgs      | `mqtt_broker.h` (`BROKER_INFLIGHT_PER_CLIENT_MAX`) |
-| QoS-1 in-flight total cap | 2 MB         | `mqtt_broker.h` (`BROKER_INFLIGHT_TOTAL_BYTES_MAX`) |
-| QoS-1 retry initial   | 15 s            | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_INITIAL_MS`) |
-| QoS-1 retry max       | 5 attempts      | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_MAX`) |
-| Default WiFi SSID     | _(empty)_       | `wifi_connect.h`                             |
-| AP IP Address         | `192.168.25.1`  | `Kconfig.projbuild`                          |
-| AP Netmask            | `255.255.255.0` | `Kconfig.projbuild`                          |
-| LED GPIO              | 21              | `main.c`                                     |
+| Setting                   | Default         | File                                                 |
+| ------------------------- | --------------- | ---------------------------------------------------- |
+| Firmware version          | 0.6.0           | `version.h`                                          |
+| Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)         |
+| Max clients               | 100             | `mqtt_broker.h`                                      |
+| Max subscriptions         | 2,048           | `mqtt_broker.h`                                      |
+| MQTT port                 | 1883            | `mqtt_broker.h`                                      |
+| Keepalive grace           | 10 seconds      | `mqtt_broker.h`                                      |
+| Max retained msg size     | 64 KB           | `mqtt_broker.h`                                      |
+| Retain memory cap         | 80% PSRAM       | `mqtt_broker.h`                                      |
+| QoS-1 in-flight / client  | 20 msgs         | `mqtt_broker.h` (`BROKER_INFLIGHT_PER_CLIENT_MAX`)   |
+| QoS-1 in-flight total cap | 2 MB            | `mqtt_broker.h` (`BROKER_INFLIGHT_TOTAL_BYTES_MAX`)  |
+| QoS-1 retry initial       | 15 s            | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_INITIAL_MS`) |
+| QoS-1 retry max           | 5 attempts      | `mqtt_broker.h` (`BROKER_INFLIGHT_RETRY_MAX`)        |
+| Default WiFi SSID         | _(empty)_       | `wifi_connect.h`                                     |
+| AP IP Address             | `192.168.25.1`  | `Kconfig.projbuild`                                  |
+| AP Netmask                | `255.255.255.0` | `Kconfig.projbuild`                                  |
+| LED GPIO                  | 21              | `main.c`                                             |
 
 ### Scaling the Client Limit
 
@@ -423,16 +451,16 @@ app_main()
 
 ### Memory Layout (8 MB PSRAM)
 
-| Allocation             | Size            | Notes                                                       |
-| ---------------------- | --------------- | ----------------------------------------------------------- |
-| Client structs         | ~10 KB          | 100 × broker_client_t (without recv buf)                    |
-| Recv buffers           | 1,600 KB        | 100 × 16 KB (configurable)                                  |
-| Subscription pool      | 280 KB          | 2,048 × broker_sub_t                                        |
-| Send buffer            | 16 KB           | Shared, configurable                                        |
-| QoS-1 in-flight slots  | ~96 KB          | 100 × 20 × broker_inflight_t (headers only; payloads on-demand) |
-| QoS-1 in-flight bytes  | up to 2 MB      | Dynamic topic+payload allocs, cap enforced; overflow degrades to QoS 0 |
-| Retained messages      | Up to ~5,120 KB | 80% of remaining PSRAM                                      |
-| **Free heap**          | ~6,250 KB       | Available for retained store + general use                  |
+| Allocation            | Size            | Notes                                                                  |
+| --------------------- | --------------- | ---------------------------------------------------------------------- |
+| Client structs        | ~10 KB          | 100 × broker_client_t (without recv buf)                               |
+| Recv buffers          | 1,600 KB        | 100 × 16 KB (configurable)                                             |
+| Subscription pool     | 280 KB          | 2,048 × broker_sub_t                                                   |
+| Send buffer           | 16 KB           | Shared, configurable                                                   |
+| QoS-1 in-flight slots | ~96 KB          | 100 × 20 × broker_inflight_t (headers only; payloads on-demand)        |
+| QoS-1 in-flight bytes | up to 2 MB      | Dynamic topic+payload allocs, cap enforced; overflow degrades to QoS 0 |
+| Retained messages     | Up to ~5,120 KB | 80% of remaining PSRAM                                                 |
+| **Free heap**         | ~6,250 KB       | Available for retained store + general use                             |
 
 ### MQTT QoS
 
@@ -449,13 +477,13 @@ QoS 1, every PUBLISH sent to them is held in an in-flight slot until the
 matching PUBACK arrives. If the PUBACK doesn't come in time, the broker
 retransmits with `DUP=1`:
 
-| Setting                  | Default | Notes                                                       |
-| ------------------------ | ------- | ----------------------------------------------------------- |
-| In-flight slots / client | 20      | After 20 unacked messages, further QoS-1 sends to that client degrade to QoS 0 (still delivered) |
-| Global memory cap        | 2 MB    | Total topic+payload bytes across all in-flight messages; overflow also degrades to QoS 0 |
-| First retry              | 15 s    | Time after the original send                                |
-| Retry backoff            | ×2       | 15 s, 30 s, 60 s, 60 s, 60 s                                 |
-| Max retries              | 5       | After which the broker logs and abandons the message        |
+| Setting                  | Default  | Notes                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-flight slots / client | 20       | After 20 unacked messages, further QoS-1 sends to that client degrade to QoS 0 (still delivered)                                                                                                                                                                                                                                |
+| Global memory cap        | 2 MB     | Total topic+payload bytes across all in-flight messages; overflow also degrades to QoS 0                                                                                                                                                                                                                                        |
+| First retry              | 15 s     | Time after the original send                                                                                                                                                                                                                                                                                                    |
+| Retry backoff            | ×2       | 15 s, 30 s, 60 s, 60 s, 60 s                                                                                                                                                                                                                                                                                                    |
+| Max retries              | 5        | After which the broker logs and abandons the message                                                                                                                                                                                                                                                                            |
 | Persistence              | RAM only | In-flight state is volatile — a broker reboot drops all queues. Subscribers with `clean_session=false` get `session present=0` and must resubscribe. Phase 4 will add PSRAM-resident persistent sessions; flash-backed persistence is intentionally out of scope (10-year device-life goal precludes per-message flash writes). |
 
 The per-client `inflight` count is exposed on the `/clients` page and in
@@ -503,24 +531,24 @@ python3 test_broker.py 192.168.1.100 1883
 
 The test suite runs **~118 assertions** across 21 test sections:
 
-| #   | Test                     | What it verifies                                             |
-| --- | ------------------------ | ------------------------------------------------------------ |
-| 1   | Basic Connect/Disconnect | CONNECT, empty client ID, PINGREQ/PINGRESP, DISCONNECT       |
-| 2   | Publish/Subscribe        | Single topic delivery, multi-topic delivery                  |
-| 3   | Wildcard Subscriptions   | `+` match/exclude, `#` match/exclude, `$SYS` protection      |
-| 4   | Retained Messages        | Store + deliver to new subscriber, delete with empty payload |
-| 5   | Binary/Image Payloads    | 100B to 15KB with MD5 integrity verification                 |
-| 6   | Concurrent Connections   | 50 simultaneous clients, all respond to PING                 |
-| 7   | Message Throughput       | 200 messages, 100% QoS 0 delivery rate                       |
-| 8   | Pub-to-Sub Latency       | 50 samples, average under 300ms over WiFi                    |
-| 9   | Duplicate Client ID      | Second client displaces first (per MQTT spec)                |
-| 10  | Keep-Alive Enforcement   | 2s keepalive, disconnected after timeout + grace             |
-| 11  | Many Topics              | 100 unique topics across 5 subscribers                       |
-| 12  | Web Portal API           | JSON structure validation, all fields present                |
-| 13  | Web Portal Pages         | All pages return 200, unknown paths return 404               |
-| 14  | Portal Settings Save     | POST save, persistence verification, input validation        |
-| 15  | Unsubscribe              | Receives before, silent after unsubscribe                    |
-| 16  | QoS 1 Inbound            | PUBACK round-trip, 20-msg burst all acknowledged + delivered |
+| #   | Test                     | What it verifies                                                                |
+| --- | ------------------------ | ------------------------------------------------------------------------------- |
+| 1   | Basic Connect/Disconnect | CONNECT, empty client ID, PINGREQ/PINGRESP, DISCONNECT                          |
+| 2   | Publish/Subscribe        | Single topic delivery, multi-topic delivery                                     |
+| 3   | Wildcard Subscriptions   | `+` match/exclude, `#` match/exclude, `$SYS` protection                         |
+| 4   | Retained Messages        | Store + deliver to new subscriber, delete with empty payload                    |
+| 5   | Binary/Image Payloads    | 100B to 15KB with MD5 integrity verification                                    |
+| 6   | Concurrent Connections   | 50 simultaneous clients, all respond to PING                                    |
+| 7   | Message Throughput       | 200 messages, 100% QoS 0 delivery rate                                          |
+| 8   | Pub-to-Sub Latency       | 50 samples, average under 300ms over WiFi                                       |
+| 9   | Duplicate Client ID      | Second client displaces first (per MQTT spec)                                   |
+| 10  | Keep-Alive Enforcement   | 2s keepalive, disconnected after timeout + grace                                |
+| 11  | Many Topics              | 100 unique topics across 5 subscribers                                          |
+| 12  | Web Portal API           | JSON structure validation, all fields present                                   |
+| 13  | Web Portal Pages         | All pages return 200, unknown paths return 404                                  |
+| 14  | Portal Settings Save     | POST save, persistence verification, input validation                           |
+| 15  | Unsubscribe              | Receives before, silent after unsubscribe                                       |
+| 16  | QoS 1 Inbound            | PUBACK round-trip, 20-msg burst all acknowledged + delivered                    |
 | 17  | QoS 1 Outbound           | SUBACK grants 1, min(pub,granted) per delivery, exactly-once, in-flight settles |
 
 ### Stress Test
