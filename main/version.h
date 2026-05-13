@@ -6,14 +6,13 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-/* 0.7.0-rc3: Phase 3 of plan-ntp-server.md -- /time portal page, mDNS
- * _ntp._udp advertisement (substituting for DHCP option 42 which IDF's
- * DHCP server doesn't expose for arbitrary option codes), and a
- * recent-clients table sourced from the rate-limit LRU. */
+/* 0.7.0: NTP feature complete (plan-ntp-server.md Phases 1-3).
+ * Tagged release. Test suite (test_ntp.py + test_broker.py) green
+ * against the live device on this build; `make test` runs both. */
 #define FW_VERSION_MAJOR  0
 #define FW_VERSION_MINOR  7
 #define FW_VERSION_PATCH  0
-#define FW_VERSION        "0.7.0-rc3"
+#define FW_VERSION        "0.7.0"
 #define FW_NAME           "mqtt_broker"
 
 #endif /* VERSION_H */
