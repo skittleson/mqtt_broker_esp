@@ -44,9 +44,32 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.25.1"
+HOST = sys.argv[1] if len(sys.argv) > 1 else \
+    __import__("os").environ.get("BROKER_HOST", "192.168.25.1")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 1883
 HTTP_BASE = f"http://{HOST}"
+
+# Basic Auth wiring: if BROKER_AUTH=user:pass is in the env, monkey-patch
+# the `requests` module's get/post so every HTTP call sends credentials
+# without per-call edits. Keeps the rest of test_broker.py untouched.
+if requests is not None:
+    _auth_raw = __import__("os").environ.get("BROKER_AUTH", "").strip()
+    if _auth_raw and ":" in _auth_raw:
+        _u, _, _p = _auth_raw.partition(":")
+        _basic = requests.auth.HTTPBasicAuth(_u, _p)
+        _orig_get = requests.get
+        _orig_post = requests.post
+
+        def _auth_get(url, **kw):
+            kw.setdefault("auth", _basic)
+            return _orig_get(url, **kw)
+
+        def _auth_post(url, *a, **kw):
+            kw.setdefault("auth", _basic)
+            return _orig_post(url, *a, **kw)
+
+        requests.get = _auth_get  # type: ignore[assignment]
+        requests.post = _auth_post  # type: ignore[assignment]
 
 # ── Test infrastructure ───────────────────────────────────────
 
@@ -869,77 +892,112 @@ def test_portal_save_settings():
     session.headers.update({"Connection": "close"})
 
     # Save settings via POST
-    try:
-        resp = session.post(f"{HTTP_BASE}/save-settings", data={
-            "mqtt_port": "1883",
-            "auth_user": "",
-            "auth_pass": "",
-            "buf_size": "16384",
-            "retain_en": "1",
-            "retain_ttl_h": "168",
-            "ap_ssid": "mqtt-broker",
-            "ap_pass": "mqtt1234",
-        }, timeout=5, allow_redirects=False)
+    # NOTE: as of v0.6.3 the portal's /save-settings and /save handlers
+    # respond with the reboot-countdown HTML (~3 KB) and then esp_restart()
+    # the device. The previous flow was a 302 redirect, which this test
+    # was written for. The destructive write-then-reboot cycle is best
+    # tested via Playwright end-to-end (tools/capture_save_reboot.py);
+    # here we skip the actual POSTs by default and only verify the GET
+    # side so the suite stays fast and idempotent.
+    #
+    # Set BROKER_TEST_DESTRUCTIVE=1 to run the full cycle (will reboot
+    # the device 2-3 times; adds ~2 min).
+    destructive = __import__("os").environ.get(
+        "BROKER_TEST_DESTRUCTIVE", "") == "1"
 
-        if resp.status_code in (302, 200):
-            ok(f"POST /save-settings → {resp.status_code}")
+    if not destructive:
+        skip("POST /save-settings (would reboot device; "
+             "BROKER_TEST_DESTRUCTIVE=1 to enable)")
+        skip("Settings persistence across reboot (destructive)")
+        skip("POST /save short-password rejection (destructive)")
+        skip("POST /save-settings short ap_pass rejection (destructive)")
+    else:
+        # The POST closes the socket mid-response when the device
+        # reboots. urllib3 raises ConnectionError / ChunkedEncodingError.
+        # Treat that as SUCCESS: device accepted the request and started
+        # its reboot cycle.
+        def _save_or_reboot(url, data, label):
+            try:
+                resp = session.post(url, data=data, timeout=5,
+                                    allow_redirects=False)
+                if resp.status_code in (200, 302):
+                    ok(f"{label} \u2192 {resp.status_code}")
+                else:
+                    fail(f"{label} \u2192 {resp.status_code}")
+            except (requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ConnectionError) as e:
+                ok(f"{label} \u2192 socket closed during reboot "
+                   f"(as expected since 0.6.3): {type(e).__name__}")
+
+        def _wait_back_online(timeout=40):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    if session.get(f"{HTTP_BASE}/api/ping",
+                                   timeout=2).status_code == 200:
+                        return True
+                except Exception:
+                    pass
+                time.sleep(1)
+            return False
+
+        _save_or_reboot(f"{HTTP_BASE}/save-settings", {
+            "mqtt_port": "1883", "auth_user": "", "auth_pass": "",
+            "buf_size": "16384", "retain_en": "1", "retain_ttl_h": "168",
+            "ap_ssid": "mqtt-broker", "ap_pass": "",
+        }, "POST /save-settings")
+        if _wait_back_online():
+            try:
+                resp = session.get(f"{HTTP_BASE}/settings", timeout=5)
+                if "16384" in resp.text and "mqtt-broker" in resp.text:
+                    ok("Settings persisted across reboot")
+                else:
+                    fail("Settings did not persist across reboot")
+            except Exception as e:
+                fail(f"Settings verification failed: {e}")
         else:
-            fail(f"POST /save-settings → {resp.status_code}")
-    except Exception as e:
-        fail(f"POST /save-settings failed: {e}")
+            fail("Device did not come back online within 40s after save")
 
-    time.sleep(0.5)
+        # WiFi save with short password: server-side rejected before the
+        # reboot cycle, so no reboot here.
+        try:
+            resp = session.post(f"{HTTP_BASE}/save", data={
+                "ssid": "test-net", "password": "short",
+            }, timeout=5, allow_redirects=False)
+            if resp.status_code in (200, 302):
+                ok(f"POST /save short password \u2192 {resp.status_code} "
+                   f"(rejected pre-write, no reboot)")
+            else:
+                fail(f"POST /save short password \u2192 {resp.status_code}")
+        except Exception as e:
+            fail(f"WiFi validation test failed: {e}")
 
-    # Verify settings persisted by loading settings page
-    try:
-        resp = session.get(f"{HTTP_BASE}/settings", timeout=5)
-        if "16384" in resp.text and "mqtt-broker" in resp.text:
-            ok("Settings page reflects saved values")
-        else:
-            fail("Settings page does not reflect saved values")
-    except Exception as e:
-        fail(f"Settings verification failed: {e}")
-
-    time.sleep(0.5)
-
-    # Test WiFi validation — short password should be rejected
-    try:
-        resp = session.post(f"{HTTP_BASE}/save", data={
-            "ssid": "test-net",
-            "password": "short",
-        }, timeout=5, allow_redirects=False)
-        if resp.status_code == 302:
-            ok("POST /save with short password → redirected (server-side validation)")
-        else:
-            ok(f"POST /save with short password → {resp.status_code}")
-    except Exception as e:
-        fail(f"WiFi validation test failed: {e}")
-
-    time.sleep(0.5)
-
-    # Test AP password validation — short password should not be saved
-    try:
-        resp = session.post(f"{HTTP_BASE}/save-settings", data={
-            "mqtt_port": "1883",
-            "auth_user": "",
-            "auth_pass": "",
-            "buf_size": "16384",
-            "retain_en": "1",
-            "retain_ttl_h": "168",
-            "ap_ssid": "mqtt-broker",
-            "ap_pass": "short",
-        }, timeout=5, allow_redirects=False)
-
-        time.sleep(0.5)
-
-        # Check that ap_pass was NOT changed to "short"
-        resp2 = session.get(f"{HTTP_BASE}/settings", timeout=5)
-        if "short" not in resp2.text or "mqtt1234" in resp2.text:
-            ok("AP password validation: short password rejected")
-        else:
-            fail("AP password validation: short password was accepted")
-    except Exception as e:
-        fail(f"AP password validation failed: {e}")
+        # AP password: short value should not be persisted. Handler will
+        # still trigger a reboot because other fields are accepted.
+        try:
+            resp = session.post(f"{HTTP_BASE}/save-settings", data={
+                "mqtt_port": "1883", "auth_user": "", "auth_pass": "",
+                "buf_size": "16384", "retain_en": "1",
+                "retain_ttl_h": "168", "ap_ssid": "mqtt-broker",
+                "ap_pass": "short",
+            }, timeout=5, allow_redirects=False)
+            ok(f"POST /save-settings short ap_pass \u2192 "
+               f"{resp.status_code} (other fields saved, ap_pass kept)")
+        except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError):
+            ok("POST /save-settings short ap_pass \u2192 "
+               "socket closed during reboot (as expected)")
+        _wait_back_online()
+        try:
+            resp2 = session.get(f"{HTTP_BASE}/settings", timeout=5)
+            # The form renders AP password as empty (placeholder) so
+            # "short" must not appear anywhere in the HTML.
+            if "value='short'" not in resp2.text:
+                ok("AP password validation: short value not echoed")
+            else:
+                fail("AP password validation: short value was accepted")
+        except Exception as e:
+            fail(f"AP password verification failed: {e}")
 
     session.close()
 
@@ -1398,10 +1456,16 @@ def test_connected_clients():
             else:
                 fail(f"  Client '{name}' not found on /clients page")
 
-        if "auto-refreshes" in html or "auto-refresh" in html.lower():
-            ok("  /clients has auto-refresh")
+        # 0.6.0 swap: legacy `setTimeout(location.reload)` replaced with
+        # in-place fetch('/api/clients') polling. Either keeps the page
+        # fresh; flag only if neither is present.
+        if ("fetch('/api/clients'" in html
+                or "auto-refreshes" in html
+                or "auto-refresh" in html.lower()):
+            ok("  /clients has live refresh "
+               "(legacy reload or /api/clients polling)")
         else:
-            fail("  /clients missing auto-refresh")
+            fail("  /clients page has no live-refresh mechanism")
 
     except Exception as e:
         fail(f"Client tracking test failed: {e}")
