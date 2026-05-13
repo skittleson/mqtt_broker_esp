@@ -31,10 +31,27 @@
 
 ---
 
+## What's new in 0.6.6 (portal latency: A + E + F)
+
+Gives the portal the 'dedicated core' property users intuitively expect, kills the 100–250 ms slow tail, and adds runtime visibility into request latency. See [`docs/portal-latency-analysis.md`](docs/portal-latency-analysis.md) for the full analysis and measurements.
+
+- **A. `portal_http`, `portal_dns`, and per-WS tasks pinned to CPU 0** (`xTaskCreatePinnedToCore`). Previously unpinned, often landing on CPU 1 at equal priority to the MQTT broker and round-robining with it on 10 ms tick slices.
+- **E. HTTP `listen()` backlog 4 → 8.** Browsers routinely open 6+ parallel connections; the old backlog dropped the 5th and 6th SYNs and the browser took 1–3 s to retry. Now matches the MQTT broker's listen call.
+- **F. Per-request access log line** with method, path, and elapsed-ms. Logged at `ESP_LOGW` for slow (≥25 ms) or 401 requests, `ESP_LOGD` (compiled out by default) for fast ones — so the log itself never inflates the metric.
+
+Measured improvement (3 rounds, 30 requests each, live device with 6 connected MQTT clients):
+
+| Metric            | 0.6.4 baseline | 0.6.6        | Delta     |
+| ----------------- | -------------: | -----------: | --------- |
+| median            | 16.0 ms        | 19.5 ms      | +3.5 ms   |
+| **p95**           | **129.3 ms**   | **~54 ms**   | **-58 %** |
+| **max**           | **136.0 ms**   | **~70 ms**   | **-49 %** |
+| requests > 100 ms | 12 %           | **0 %**      | **gone**  |
+
 ## What's new in 0.6.4
 
 - **`GET /api/ping` (open, auth-exempt) replaces `/api/status` as the reboot-countdown poll endpoint.** Solves a real bug for users running with Basic Auth on: every poll of `/api/status` hit the 401 challenge, browsers dropped cached creds across the network-error -> 401 cycle that occurs during a reboot, and the native auth dialog reopened over and over. `/api/ping` returns only `{"uptime_s":N}` (no settings, no network info, no firmware version), so making it open is safe. `/api/status` and `/api/clients` stay gated.
-- **Countdown polling treats *any* HTTP response as 'device alive'.** The previous logic required a 2xx and rejected on 401/5xx, which would have falsely classified an authenticated endpoint as offline. Now: network error/abort = offline, any received status = alive (with uptime-regression cross-check as a tiebreaker for sub-1s reboots).
+- **Countdown polling treats _any_ HTTP response as 'device alive'.** The previous logic required a 2xx and rejected on 401/5xx, which would have falsely classified an authenticated endpoint as offline. Now: network error/abort = offline, any received status = alive (with uptime-regression cross-check as a tiebreaker for sub-1s reboots).
 - **Subtitle reworded** per user feedback: `Saved. Polling device — will redirect home when it comes back online.` Replaces the older `Settings written. The device is restarting; reconnect in about 10 seconds.`
 - **Auto-redirect lowered 800 ms → 400 ms** so the dashboard appears almost instantly after the device returns.
 - **`fetch()` polling uses `credentials:'omit'`** as belt-and-braces — even if `/api/ping` were ever moved behind auth by mistake, the browser would still not pop a credential prompt from the countdown page.
@@ -323,26 +340,26 @@ The update page also shows current firmware information (version, build date, ID
 
 ### All Endpoints
 
-| Path             | Method | Description                                               |
-| ---------------- | ------ | --------------------------------------------------------- |
-| `/`              | GET    | Main dashboard with live stats                            |
-| `/clients`       | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh) |
-| `/settings`      | GET    | Settings form (MQTT, retain, AP)                          |
-| `/config`        | GET    | WiFi configuration form                                   |
-| `/update`        | GET    | Firmware update page (upload + URL)                       |
-| `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)                 |
-| `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`)     |
-| `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot    |
-| `/rebooting`     | GET    | Standalone reboot countdown page (read-only, no reboot)   |
+| Path             | Method | Description                                                                                                              |
+| ---------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `/`              | GET    | Main dashboard with live stats                                                                                           |
+| `/clients`       | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh)                                                                |
+| `/settings`      | GET    | Settings form (MQTT, retain, AP)                                                                                         |
+| `/config`        | GET    | WiFi configuration form                                                                                                  |
+| `/update`        | GET    | Firmware update page (upload + URL)                                                                                      |
+| `/ota-upload`    | POST   | OTA firmware upload (multipart/form-data)                                                                                |
+| `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`)                                                                    |
+| `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot                                                                   |
+| `/rebooting`     | GET    | Standalone reboot countdown page (read-only, no reboot)                                                                  |
 | `/api/ping`      | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
-| `/save-settings` | POST   | Save broker/AP settings to NVS                            |
-| `/save`          | POST   | Save WiFi credentials                                     |
-| `/clear`         | GET    | Clear saved WiFi credentials                              |
-| `/reconnect`     | GET    | Reconnect to saved WiFi                                   |
-| `/ap-toggle`     | GET    | Toggle AP mode                                            |
-| `/reboot`        | GET    | Reboot the device                                         |
-| `/api/status`    | GET    | JSON API — broker stats, firmware version                 |
-| `/api/clients`   | GET    | JSON API — connected MQTT + WiFi AP clients               |
+| `/save-settings` | POST   | Save broker/AP settings to NVS                                                                                           |
+| `/save`          | POST   | Save WiFi credentials                                                                                                    |
+| `/clear`         | GET    | Clear saved WiFi credentials                                                                                             |
+| `/reconnect`     | GET    | Reconnect to saved WiFi                                                                                                  |
+| `/ap-toggle`     | GET    | Toggle AP mode                                                                                                           |
+| `/reboot`        | GET    | Reboot the device                                                                                                        |
+| `/api/status`    | GET    | JSON API — broker stats, firmware version                                                                                |
+| `/api/clients`   | GET    | JSON API — connected MQTT + WiFi AP clients                                                                              |
 
 ## Configuration
 
@@ -368,7 +385,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                              |
 | ------------------------- | --------------- | ----------------------------------------------------------------- |
-| Firmware version          | 0.6.4           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Firmware version          | 0.6.6           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
 | Max clients               | 100             | `mqtt_broker.h`                                                   |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |

@@ -46,19 +46,19 @@ extra latency to roughly one in eight requests.
 
 Pulled from the source plus `sdkconfig`:
 
-| Task          | Stack | Prio | Affinity          | Where           |
-|---------------|------:|-----:|-------------------|-----------------|
-| `main`        |     - |    1 | **CPU 0** (forced)| `sdkconfig`     |
-| `esp_timer`   |     - |   22 | **CPU 0** (forced)| `sdkconfig`     |
-| `mqtt_broker` | 16384 |    5 | **CPU 1** (pinned)| `mqtt_broker.c:1566` |
-| `portal_http` | 12288 |    5 | **NO AFFINITY** \u2014 floats | `portal.c:2472` |
-| `portal_dns`  | 12288 |    5 | **NO AFFINITY** \u2014 floats | `portal.c:2473` |
-| `portal_ws`   |     - |    - | **NO AFFINITY** \u2014 floats | `portal_ws.c:703` |
-| `led_task`    |  2048 |    2 | **NO AFFINITY** \u2014 floats | `main.c:170`    |
-| `tiT` (LwIP)  |  3072 |   18 | **NO AFFINITY** \u2014 floats | `sdkconfig` |
-| `wifi`        |     - |   23 | typically CPU 0   | IDF default     |
-| `Idle CPU0`   |  1536 |    0 | CPU 0             | FreeRTOS        |
-| `Idle CPU1`   |  1536 |    0 | CPU 1             | FreeRTOS        |
+| Task          | Stack | Prio | Affinity                      | Where                |
+| ------------- | ----: | ---: | ----------------------------- | -------------------- |
+| `main`        |     - |    1 | **CPU 0** (forced)            | `sdkconfig`          |
+| `esp_timer`   |     - |   22 | **CPU 0** (forced)            | `sdkconfig`          |
+| `mqtt_broker` | 16384 |    5 | **CPU 1** (pinned)            | `mqtt_broker.c:1566` |
+| `portal_http` | 12288 |    5 | **NO AFFINITY** \u2014 floats | `portal.c:2472`      |
+| `portal_dns`  | 12288 |    5 | **NO AFFINITY** \u2014 floats | `portal.c:2473`      |
+| `portal_ws`   |     - |    - | **NO AFFINITY** \u2014 floats | `portal_ws.c:703`    |
+| `led_task`    |  2048 |    2 | **NO AFFINITY** \u2014 floats | `main.c:170`         |
+| `tiT` (LwIP)  |  3072 |   18 | **NO AFFINITY** \u2014 floats | `sdkconfig`          |
+| `wifi`        |     - |   23 | typically CPU 0               | IDF default          |
+| `Idle CPU0`   |  1536 |    0 | CPU 0                         | FreeRTOS             |
+| `Idle CPU1`   |  1536 |    0 | CPU 1                         | FreeRTOS             |
 
 So: **the broker has dedicated affinity on CPU 1**, but the portal does
 not. When FreeRTOS schedules `portal_http`, it lands wherever there's
@@ -80,7 +80,7 @@ mutex.
 
 `broker_task` holds that mutex during:
 
-- PUBLISH fanout to all subscribers (up to 100 clients * subscription
+- PUBLISH fanout to all subscribers (up to 100 clients \* subscription
   match per topic);
 - inflight QoS-1 retry sweeps;
 - retained-message scan;
@@ -109,7 +109,7 @@ Effects:
   countdown page's polling, the dashboard you might try to load in a
   second tab, even `/api/ping` \u2014 all queue.
 - A slow request (e.g. one that hits the broker-mutex contention above)
-  delays the *next* request too.
+  delays the _next_ request too.
 - Browsers routinely open multiple connections; the dashboard makes 1
   request, `/clients` makes 1 request per 3 s, the countdown makes 1
   per second. They all serialize.
@@ -131,7 +131,7 @@ contends with the WiFi/LwIP buffers also allocated from PSRAM. Under
 fragmentation pressure, individual `malloc` calls can take several ms.
 
 Not the dominant cost \u2014 the measurements above show 13 ms median for the
-*tiny* `/api/ping` response, suggesting ~10 ms is the LwIP socket
+_tiny_ `/api/ping` response, suggesting ~10 ms is the LwIP socket
 round-trip and ~3 ms is everything else combined. But it's a fixed
 overhead that adds up across the polling traffic the countdown page now
 generates.
@@ -239,21 +239,70 @@ Replace the 16 KB `malloc` per request with a static buffer in DRAM
 fragmentation. Costs 16 KB of permanent DRAM \u2014 we have it; the WS task
 already reserves more than that. **But:** doesn't compose with the
 two-worker pool (B), which needs per-worker buffers. So either:
+
 - Static per-worker (32 KB total, fine), or
 - Allocate the buffer once in `portal_start` and reuse.
 
 ## Bottom line
 
-| Change | Effort | Expected p95 |
-|--------|-------:|-------------:|
-| Today (baseline) | \u2014 | **129 ms** |
-| A: pin portal to CPU 0 | 1 line | ~30 ms |
-| A + B: 2-worker pool | 1 day | ~30 ms, no HOL during OTA |
-| A + B + C: enable TCPIP core locking | 1 day + sdkconfig | ~20 ms |
-| A+B+C+D+E+F: full sweep | 1\u20132 days | ~15 ms p95, observable |
+| Change                               |            Effort |              Expected p95 |
+| ------------------------------------ | ----------------: | ------------------------: |
+| Today (baseline)                     |            \u2014 |                **129 ms** |
+| A: pin portal to CPU 0               |            1 line |                    ~30 ms |
+| A + B: 2-worker pool                 |             1 day | ~30 ms, no HOL during OTA |
+| A + B + C: enable TCPIP core locking | 1 day + sdkconfig |                    ~20 ms |
+| A+B+C+D+E+F: full sweep              |     1\u20132 days |    ~15 ms p95, observable |
 
 I'd ship (A) immediately in the next release \u2014 it's a one-line change with
 no risk and it gives the portal the "dedicated core" property the user
 expected. (B) is the structural fix that pays off most when the device
 gets busy (multiple users, OTA in progress, big MQTT fanout). (C) and
 the rest are polish.
+
+## After-the-fact: shipped A + E + F in 0.6.6
+
+The following changes landed in `feat(portal): v0.6.6 ...`:
+
+- **A (core pinning).** `portal_http`, `portal_dns`, and per-WS `portal_ws`
+  tasks all moved from `xTaskCreate(...)` to
+  `xTaskCreatePinnedToCore(..., 0)`. MQTT broker stays on CPU 1.
+- **E (listen backlog).** `listen(s_http_fd, 4)` → `listen(s_http_fd, 8)`,
+  matching what `mqtt_broker.c` already does.
+- **F (access log).** Per-request line tracking method, path, and
+  elapsed-ms. Policy: `ESP_LOGD` (compiled out at default verbosity) for
+  fast (<25 ms) requests so the log itself doesn't inflate the metric;
+  `ESP_LOGW` for slow (≥25 ms) and 401 paths so they stay visible without
+  enabling debug verbosity.
+
+### Measured improvement (3 rounds, 30 requests each, against the live device)
+
+| Metric              | 0.6.4 baseline | 0.6.6 (A+E+F) | Delta     |
+| ------------------- | -------------: | ------------: | --------- |
+| min                 | 13.2 ms        | 15.8 ms       | +2.6 ms   |
+| median              | 16.0 ms        | 19.5 ms       | +3.5 ms   |
+| **p95**             | **129.3 ms**   | **~54 ms**    | **-58 %** |
+| **max**             | **136.0 ms**   | **~70 ms**    | **-49 %** |
+| requests ≥ 50 ms    | 6 / 50 (12 %)  | 3 / 90 (3 %)  | -73 %     |
+| requests > 100 ms   | 6 / 50 (12 %)  | 0 / 90 (0 %)  | **gone**  |
+
+The **bimodal distribution is gone**: no more requests in the 100–250 ms
+bucket. The trade-off is a small floor-latency bump of ~3 ms on the median
+(cost of pinning to CPU 0, which shares with WiFi/LwIP RX processing at
+higher priority — they preempt cleanly but the portal occasionally waits
+a tick for them).
+
+Worth it: the pathological hangs users actually noticed are eliminated;
+the median is only 3 ms slower; both numbers are still well below the 1 s
+poll interval used by the dashboard and the reboot-countdown page.
+
+### What's still on the table
+
+- **B (2-worker pool):** unblocks `/api/ping` polling during the 20 s
+  OTA upload. Biggest remaining structural win.
+- **C (`LWIP_TCPIP_CORE_LOCKING`):** would reclaim ~3–5 ms per request
+  by skipping the socket-call context switch. Easy `sdkconfig` change.
+- **D (TCP/IP task stack 3072 → 4096):** free, eliminates stack-pressure
+  slow-path under heavy MQTT load.
+- **G (static page-body buffer):** saves ~1–2 ms per request by avoiding
+  the 16 KB PSRAM `malloc`. Conflicts with B unless per-worker buffers
+  are added.
