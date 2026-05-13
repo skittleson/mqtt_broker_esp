@@ -17,6 +17,7 @@
 #include "portal.h"
 #include "mqtt_broker.h"
 #include "wifi_connect.h"
+#include "ntp.h"
 #include "version.h"
 
 #include <string.h>
@@ -1111,7 +1112,13 @@ static void handle_http_client(int client_fd)
         nvs_settings_get_str("auth_user", cfg_user, sizeof(cfg_user), "");
         nvs_settings_get_str("auth_pass", cfg_pass, sizeof(cfg_pass), "");
 
-        bool auth_exempt = (strcmp(req.path, "/api/ping") == 0);
+        /* /api/ping  -- liveness, used by countdown polling (see above).
+         * /api/time  -- read-only NTP state, used by clients that just want
+         *               wall-clock without going through the broker. Per
+         *               plan-ntp-server.md the GET is documented as open.
+         *               No settings or secrets in the response. */
+        bool auth_exempt = (strcmp(req.path, "/api/ping") == 0) ||
+                           (strcmp(req.path, "/api/time") == 0 && req.method == REQ_GET);
 
         if (!auth_exempt && cfg_user[0] != '\0' && cfg_pass[0] != '\0') {
             /* Auth is enabled -- check credentials */
@@ -1609,6 +1616,50 @@ static void handle_http_client(int client_fd)
         }
 #endif
 
+        /* Time (NTP) -- Phase 1 of plan-ntp-server.md. Renders the current
+         * sync state (read-only) and the editable upstreams + poll + tz.
+         * State pulled live via ntp_get_state() so the form reflects the
+         * latest sync; settings pulled from NVS so empty inputs map to
+         * sensible defaults. */
+        {
+            ntp_settings_t ns;
+            ntp_get_settings(&ns);
+            ntp_state_t nstate;
+            ntp_get_state(&nstate);
+            char sync_summary[96];
+            if (nstate.synced) {
+                snprintf(sync_summary, sizeof(sync_summary),
+                         "<span style='color:#a5d6a7'>synced</span> \xc2\xb7 "
+                         "last %llds ago \xc2\xb7 %u total",
+                         (long long)nstate.last_sync_age_s,
+                         (unsigned)nstate.sync_count);
+            } else {
+                snprintf(sync_summary, sizeof(sync_summary),
+                         "<span style='color:#ffcc80'>not yet synced</span>");
+            }
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "</fieldset>"
+                "<fieldset><legend>&nbsp;Time (NTP)&nbsp;</legend>"
+                "<p style='color:#aaa;font-size:0.85em;margin:0 0 6px 0'>%s</p>"
+                "<p><label style='font-weight:normal'>"
+                "<input type='checkbox' name='ntp_en' value='1' %s> "
+                "Enable SNTP client</label></p>"
+                "<label>Upstream 1</label>"
+                "<input type='text' name='ntp_up0' value='%s' maxlength='63' placeholder='pool.ntp.org'>"
+                "<label>Upstream 2 (optional)</label>"
+                "<input type='text' name='ntp_up1' value='%s' maxlength='63' placeholder='time.cloudflare.com'>"
+                "<label>Upstream 3 (optional)</label>"
+                "<input type='text' name='ntp_up2' value='%s' maxlength='63'>"
+                "<label>Poll interval (seconds, 64-86400)</label>"
+                "<input type='number' name='ntp_poll' value='%u' min='64' max='86400'>"
+                "<label>Timezone (POSIX TZ, e.g. UTC0 or PST8PDT,M3.2.0,M11.1.0)</label>"
+                "<input type='text' name='ntp_tz' value='%s' maxlength='63'>",
+                sync_summary,
+                ns.enabled ? "checked" : "",
+                ns.upstreams[0], ns.upstreams[1], ns.upstreams[2],
+                (unsigned)ns.poll_s, ns.tz);
+        }
+
         /* The Save button triggers a reboot so changes apply uniformly
          * (MQTT port, auth credentials, retained-message toggle, NAPT, AP
          * config -- the previous "some take effect immediately, some need a
@@ -1739,6 +1790,44 @@ static void handle_http_client(int client_fd)
             ESP_LOGI(TAG, "Saved NAPT enabled: %d", napt_en);
         }
 #endif
+
+        /* NTP settings -- separate "ntp" NVS namespace per the plan. Done
+         * inline here (rather than adding portal-wide helpers) because
+         * we open the namespace once, write all six keys, commit, and
+         * close. ntp_init() reads these on the next boot. */
+        {
+            nvs_handle_t nh;
+            if (nvs_open("ntp", NVS_READWRITE, &nh) == ESP_OK) {
+                uint8_t ntp_en = (strstr(req.body, "ntp_en=1") != NULL) ? 1 : 0;
+                nvs_set_u8(nh, "enabled", ntp_en);
+                ESP_LOGI(TAG, "Saved NTP enabled: %d", ntp_en);
+
+                if (urldecode_param(req.body, "ntp_up0", val, sizeof(val))) {
+                    nvs_set_str(nh, "upstream_0", val);
+                }
+                if (urldecode_param(req.body, "ntp_up1", val, sizeof(val))) {
+                    nvs_set_str(nh, "upstream_1", val);
+                }
+                if (urldecode_param(req.body, "ntp_up2", val, sizeof(val))) {
+                    nvs_set_str(nh, "upstream_2", val);
+                }
+                if (urldecode_param(req.body, "ntp_poll", val, sizeof(val))) {
+                    long poll = strtol(val, NULL, 10);
+                    if (poll >= 64 && poll <= 86400) {
+                        nvs_set_u32(nh, "poll_s", (uint32_t)poll);
+                    } else {
+                        ESP_LOGW(TAG, "NTP poll_s out of range: %ld", poll);
+                    }
+                }
+                if (urldecode_param(req.body, "ntp_tz", val, sizeof(val))) {
+                    nvs_set_str(nh, "tz", val[0] ? val : "UTC0");
+                }
+                nvs_commit(nh);
+                nvs_close(nh);
+            } else {
+                ESP_LOGW(TAG, "Could not open NVS namespace 'ntp' to save");
+            }
+        }
 
         ESP_LOGW(TAG, "Settings saved; rebooting on user request");
         /* Subtitle wording per user request: surface that we've saved AND
@@ -2230,6 +2319,53 @@ static void handle_http_client(int client_fd)
             "{\"uptime_s\":%lld}",
             (long long)(stats.uptime_ms / 1000));
         http_response_start(client_fd, "200 OK", "application/json", len);
+        http_send_body(client_fd, json, len);
+
+    /* ============ NTP STATE (open) ============
+     * Phase 1 of plan-ntp-server.md. Returns the bare facts about the
+     * SNTP client state so clients can verify wall-clock freshness
+     * without having to add a Basic Auth dependency to a check. The
+     * upstream name is included for transparency; if you don't want it
+     * exposed, set ntp.enabled=0 in NVS (the field becomes empty). */
+    } else if (strcmp(req.path, "/api/time") == 0 && req.method == REQ_GET) {
+        ntp_state_t st;
+        ntp_get_state(&st);
+        /* Escape the hostname for safe JSON embedding (quotes/backslashes
+         * only -- our hostnames are otherwise ASCII). */
+        char host_esc[NTP_UPSTREAM_MAX_LEN * 2];
+        size_t oi = 0;
+        for (size_t ii = 0; st.upstream_used[ii] && oi < sizeof(host_esc) - 2; ii++) {
+            char c = st.upstream_used[ii];
+            if (c == '"' || c == '\\') host_esc[oi++] = '\\';
+            host_esc[oi++] = c;
+        }
+        host_esc[oi] = '\0';
+        char *json = body;
+        int len = snprintf(json, PAGE_BUF_SIZE,
+            "{\"synced\":%s,\"epoch_us\":%lld,\"last_sync_age_s\":%lld,"
+            "\"sync_count\":%u,\"upstream\":\"%s\",\"server_running\":%s}",
+            st.synced ? "true" : "false",
+            (long long)st.epoch_us,
+            (long long)st.last_sync_age_s,
+            (unsigned)st.sync_count,
+            host_esc,
+            st.server_running ? "true" : "false");
+        http_response_start(client_fd, "200 OK", "application/json", len);
+        http_send_body(client_fd, json, len);
+
+    /* ============ NTP RESYNC (gated) ============
+     * Forces an immediate upstream poll. Returns the post-resync state
+     * after a short delay (the SNTP callback fires on the esp_sntp task
+     * a few hundred ms later, so we report 'in-flight' if it hasn't
+     * landed yet). Per the plan this is auth-gated; the regular Basic
+     * Auth check above already enforces that. */
+    } else if (strcmp(req.path, "/api/time/resync") == 0 && req.method == REQ_POST) {
+        bool ok = ntp_force_resync();
+        char *json = body;
+        int len = snprintf(json, PAGE_BUF_SIZE,
+            "{\"triggered\":%s}", ok ? "true" : "false");
+        http_response_start(client_fd, ok ? "200 OK" : "503 Service Unavailable",
+                            "application/json", len);
         http_send_body(client_fd, json, len);
 
     /* ============ JSON API ============ */

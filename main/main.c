@@ -8,6 +8,7 @@
 #include "mqtt_broker.h"
 #include "wifi_connect.h"
 #include "portal.h"
+#include "ntp.h"
 #include "led_strip.h"
 #include "mdns.h"
 
@@ -258,6 +259,13 @@ void app_main(void)
     /* Start MQTT broker */
     ESP_LOGI(TAG, "Starting MQTT broker...");
     broker_start();
+
+    /* Start SNTP client (Phase 1 of plan-ntp-server.md). Safe to call
+     * before a default route is fully ready -- esp_sntp queues queries
+     * internally and fires them once DNS resolves the upstreams. The
+     * SNTP server (Phase 2) is not started here. */
+    ESP_LOGI(TAG, "Starting SNTP client...");
+    ntp_init();
 
     ESP_LOGI(TAG, "=== ESP32 MQTT Broker ready ===");
 }

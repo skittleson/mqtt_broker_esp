@@ -22,6 +22,7 @@
 
 #include "mqtt_broker.h"
 #include "mqtt_parser.h"
+#include "ntp.h"  /* ntp_is_synced(), ntp_now_us() for $SYS/broker/time */
 
 #include <string.h>
 #include <errno.h>
@@ -1408,6 +1409,7 @@ static void broker_task(void *arg)
 
     int64_t last_keepalive_check = get_time_ms();
     int64_t last_stats = get_time_ms();
+    int64_t last_sys_time   = get_time_ms();  /* Phase 1 NTP plan: $SYS/broker/time */
 
     /* ---- Main select() loop ---- */
     while (1) {
@@ -1521,6 +1523,27 @@ static void broker_task(void *arg)
         if ((now - last_keepalive_check) > 5000) {
             check_keepalive();
             last_keepalive_check = now;
+        }
+
+        /* $SYS/broker/time publisher (Phase 1 of plan-ntp-server.md).
+         * Only fires once SNTP has synced -- pre-sync we'd be publishing
+         * '0' which is worse than nothing. Cadence: every 10s, matching
+         * the plan. handle_publish_internal does the fanout exactly like
+         * an external publisher would, so subscribers using a $SYS-aware
+         * filter (#, $SYS/#, $SYS/broker/time) all receive it. */
+        if (ntp_is_synced() && (now - last_sys_time) > 10000) {
+            int64_t epoch_us = ntp_now_us();
+            if (epoch_us > 0) {
+                char payload[24];
+                int pl = snprintf(payload, sizeof(payload), "%lld",
+                                  (long long)(epoch_us / 1000000));
+                static const char topic[] = "$SYS/broker/time";
+                handle_publish_internal(topic, (uint16_t)(sizeof(topic) - 1),
+                                        (const uint8_t *)payload,
+                                        (uint32_t)pl,
+                                        /*retain=*/false, /*pub_qos=*/0);
+            }
+            last_sys_time = now;
         }
 
         /* Walk outbound QoS-1 in-flight tables for due retries. Cheap when
