@@ -503,15 +503,24 @@ static int http_send_reboot_countdown(int fd,
         "}"
         "function backOnline(){if(done)return;done=true;"
         "bar.style.width='100%%';dot.className='dot ok';"
-        "msg.textContent='Back online';go.classList.remove('hidden');"
-        "setTimeout(function(){window.location.href=go.href;},800);}"
+        "msg.textContent='Back online \xe2\x80\x94 redirecting...';go.classList.remove('hidden');"
+        /* Redirect home as soon as the device responds again. 400ms is
+         * enough for the green pill to register visually but short enough
+         * that users don't perceive a lag. */
+        "setTimeout(function(){window.location.href=go.href;},400);}"
         "function tick(){setProgress();"
         "var ctrl=('AbortController' in window)?new AbortController():null;"
         "var to=setTimeout(function(){if(ctrl)ctrl.abort();},1500);"
-        "fetch('/api/status',{cache:'no-store',signal:ctrl?ctrl.signal:undefined})"
-        ".then(function(r){return r.ok?r.json():Promise.reject(r.status);})"
-        ".then(function(d){clearTimeout(to);"
-        "var up=d&&d.system&&typeof d.system.uptime_s==='number'?d.system.uptime_s:null;"
+        /* Polls /api/ping (unauthenticated, returns just uptime). Treats
+         * any HTTP response as 'device is alive' -- so even if auth comes
+         * back on a non-exempt endpoint we'd still flip green correctly.
+         * credentials:'omit' is belt-and-braces so no browser-level auth
+         * prompt can fire from this fetch even if the URL were ever moved. */
+        "fetch('/api/ping',{cache:'no-store',credentials:'omit',signal:ctrl?ctrl.signal:undefined})"
+        ".then(function(r){clearTimeout(to);"
+        "return r.json().then(function(d){return{ok:true,d:d};},function(){return{ok:true,d:null};});})"
+        ".then(function(res){"
+        "var up=res.d&&typeof res.d.uptime_s==='number'?res.d.uptime_s:null;"
         "if(baselineUptime===null&&up!==null){baselineUptime=up;}"
         "if(seenOffline||(up!==null&&baselineUptime!==null&&up<baselineUptime)){"
         "backOnline();return;}"
@@ -1053,15 +1062,31 @@ static void handle_http_client(int client_fd)
 
     /* ---- HTTP Basic Auth check ---- */
     /* Uses the same auth_user / auth_pass as MQTT broker auth.
-     * If both are empty in NVS, auth is disabled (open portal). */
+     * If both are empty in NVS, auth is disabled (open portal).
+     *
+     * EXEMPTIONS: /api/ping is the liveness endpoint used by the reboot-
+     * countdown page's polling loop. Forcing auth on it caused two real
+     * problems for users running with Basic Auth enabled:
+     *   1. The browser's native auth dialog reopened repeatedly during
+     *      polling, because some browsers drop cached basic creds across
+     *      the network-error -> 401 -> 401 cycle that occurs while a
+     *      device is rebooting (each 401 with a WWW-Authenticate header
+     *      re-triggers the prompt unless creds are already in cache).
+     *   2. fetch() with default credentials cannot suppress that prompt.
+     * /api/ping returns only the uptime (no secrets, no settings), so
+     * making it open is the right trade-off. The dashboard, settings,
+     * and the /api/status / /api/clients endpoints with sensitive info
+     * remain auth-gated as before. */
     {
         char cfg_user[65] = "";
         char cfg_pass[65] = "";
         nvs_settings_get_str("auth_user", cfg_user, sizeof(cfg_user), "");
         nvs_settings_get_str("auth_pass", cfg_pass, sizeof(cfg_pass), "");
 
-        if (cfg_user[0] != '\0' && cfg_pass[0] != '\0') {
-            /* Auth is enabled — check credentials */
+        bool auth_exempt = (strcmp(req.path, "/api/ping") == 0);
+
+        if (!auth_exempt && cfg_user[0] != '\0' && cfg_pass[0] != '\0') {
+            /* Auth is enabled -- check credentials */
             bool auth_ok = (strcmp(req.auth_user, cfg_user) == 0 &&
                             strcmp(req.auth_pass, cfg_pass) == 0);
             if (!auth_ok) {
@@ -1683,9 +1708,12 @@ static void handle_http_client(int client_fd)
 #endif
 
         ESP_LOGW(TAG, "Settings saved; rebooting on user request");
+        /* Subtitle wording per user request: surface that we've saved AND
+         * that the countdown page is actively polling, with a clear promise
+         * of a redirect home -- no more "reconnect in 10s" guesswork. */
         http_send_reboot_countdown(client_fd,
             "Saving and rebooting",
-            "Settings written. The device is restarting; reconnect in about 10 seconds.",
+            "Saved. Polling device \xe2\x80\x94 will redirect home when it comes back online.",
             "/");
         free(body);
         close(client_fd);
@@ -2154,6 +2182,22 @@ static void handle_http_client(int client_fd)
             "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
+
+    /* ============ LIVENESS PING ============
+     * Minimal endpoint used by the reboot-countdown polling loop. Always
+     * exempt from Basic Auth (see the auth-check block above). Returns
+     * only uptime so it leaks nothing about settings, network, or topology.
+     * The countdown JS uses this for two signals: (a) any HTTP response =
+     * device is alive, (b) uptime regression = fresh boot detected. */
+    } else if (strcmp(req.path, "/api/ping") == 0) {
+        broker_stats_t stats;
+        broker_get_stats(&stats);
+        char *json = body;
+        int len = snprintf(json, PAGE_BUF_SIZE,
+            "{\"uptime_s\":%lld}",
+            (long long)(stats.uptime_ms / 1000));
+        http_response_start(client_fd, "200 OK", "application/json", len);
+        http_send_body(client_fd, json, len);
 
     /* ============ JSON API ============ */
     } else if (strcmp(req.path, "/api/status") == 0) {
