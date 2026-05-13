@@ -31,83 +31,60 @@
 
 ---
 
-## What's new in 0.7.0-rc3 (NTP Phase 3: `/time` page + mDNS discovery)
+## What's new in 0.7.0 (NTP support)
 
-Finishes the user-visible part of the NTP feature.
+The broker is now a complete LAN-local time source. Plan:
+[`plan-ntp-server.md`](plan-ntp-server.md). Tagged release —
+integration test suite (`make test`) green against the live device on
+this build.
 
-- **New `/time` portal page.** Server-rendered, no JS in the hot path,
-  `<meta http-equiv='refresh' content='10'>` for hands-free clock updates.
-  Shows a big UTC clock (green when synced, orange when not), client +
-  server status cards, a `Force resync` button, and a recent-clients
-  table sourced from the SNTP server's rate-limit LRU. Dashboard gets a
-  new `Time / NTP` button between `MQTT Tester` and `Information`.
-- **mDNS `_ntp._udp` service advertisement.** Substitutes for DHCP option
-  42 — ESP-IDF's DHCP server only emits the fixed `dhcps_offer_option`
-  set (router + DNS); adding arbitrary option codes would need an IDF
-  patch. mDNS gives equivalent auto-discovery on Avahi-aware clients
-  (macOS, iOS, ChromeOS, Linux Avahi). Verified live with a direct query
-  to `224.0.0.251:5353` — device responds with a 120 B record containing
-  `_ntp._udp.local`.
-- **Per-source `total` counter** on the rate-limit LRU. Free piggyback
-  observability; surfaced via `ntp_get_recent_clients()` and the new
-  `/time` table.
-
-Acceptance criteria #1–4 all met now. #5 (`make test-ntp` CI) remains
-deferred to a Phase 0 follow-up.
-
-## What's new in 0.7.0-rc2 (NTP Phase 2: SNTP server)
-
-The broker is now a complete time source. Any LAN client can point at the
-device and sync from it.
-
-- **UDP :123 SNTPv4 server.** Single FreeRTOS task pinned to CPU 0, static
-  48-byte tx buffer, no malloc in the hot path. Drops oversize (>68 B) and
-  undersize (<48 B) packets silently to defang amplification attacks;
-  rejects mode=6 / mode=7 (control/private). Per-source rate limit:
-  10 req/s, 32-entry LRU.
-- **Stratum / leap handling per RFC 4330.** Pre-sync: stratum 16 + LI=3
-  (alarm), ref_id `"INIT"` — well-behaved clients (chrony, ntpd, w32time,
-  systemd-timesyncd) ignore the source. Post-sync: stratum 3, LI=0,
-  ref_id `"ESP3"`.
-- **`$SYS/broker/ntp/synced`, `/stratum`, `/served`** — retained topics
-  published every 10 s. New MQTT subscribers see the latest values
-  immediately on connect.
-- **Settings page** gets a second status line (`server · serving on UDP:123
-· stratum 3 · 8 served · dropped 0/2/1`) and an independent
-  `Enable SNTP server` checkbox.
-- **`/api/time`** picks up `server_running`, `stratum`, `served`, and
-  `dropped.{rate,size,mode}` fields. Same auth-exempt path as Phase 1.
-
-Measured against a raw SNTPv4 client from the developer host: **5.6 ms
-RTT, ‘19 ms offset** — well under the plan target of ±50 ms.
-
-Not in this release (Phase 3+): DHCP option 42 advertise-self, `/time`
-portal page with live clock, manual `POST /api/time/set`, drift
-compensation while free-running.
-
-## What's new in 0.7.0-rc1 (NTP Phase 1: SNTP client)
-
-First slice of [`plan-ntp-server.md`](plan-ntp-server.md). The broker now has
-real wall-clock time, served from public NTP and exposed three ways:
-
-- **`GET /api/time`** — open (auth-exempt like `/api/ping`). Returns
-  `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.
-  Any LAN client can verify the broker is time-synced without credentials;
-  no settings or secrets in the response.
+- **SNTP client** — `esp_sntp` against up to 3 configurable upstreams
+  (defaults: `pool.ntp.org` + `time.cloudflare.com`). Settings persisted
+  in NVS namespace `ntp`: enable flag, server-enable flag, upstreams,
+  poll interval, POSIX TZ. **Measured drift from `pool.ntp.org`: well
+  below ±50 ms** (plan target).
+- **SNTP server on UDP :123** — single FreeRTOS task pinned to CPU 0,
+  static 48-byte tx buffer, no malloc in the hot path. Drops oversize
+  (>68 B) and undersize (<48 B) packets silently (anti-amplification);
+  rejects mode=6 / mode=7 (control/private). Per-source rate limit: 10
+  req/s, 32-entry LRU. Pre-sync: stratum 16 + LI=3 (alarm) — well-behaved
+  clients (chrony, ntpd, w32time, systemd-timesyncd) ignore. Post-sync:
+  stratum 3 / LI=0 / `ref_id="ESP3"`. Hand-rolled SNTPv4 client test
+  measured **5.6 ms RTT, 0.1 ms server handler latency**.
+- **`GET /api/time`** — open (auth-exempt). Returns `{synced, epoch_us,
+  last_sync_age_s, sync_count, upstream, server_running, stratum, served,
+  dropped: {rate, size, mode}}`. Any LAN client can verify the broker is
+  time-synced without credentials.
 - **`POST /api/time/resync`** — auth-gated. Forces an immediate upstream
-  poll. Useful after a network outage to confirm the broker re-locks
-  before you go to bed.
-- **`$SYS/broker/time`** — published every 10 s while synced, payload is
-  ASCII epoch seconds. Subscribers see fresh time without HTTP polling.
-- **`Time (NTP)` section in `/settings`** — live sync state (“synced · last
-  14s ago · 3 total”), enable toggle, three upstream slots, poll interval,
-  POSIX TZ string.
+  poll.
+- **`$SYS/broker/time`** — non-retained, ASCII epoch seconds, every 10 s.
+  **`$SYS/broker/ntp/synced`**, **`/stratum`**, **`/served`** — retained;
+  new subscribers see current state on connect.
+- **`/time` portal page** — Tasmota-style HTML, server-rendered, no JS in
+  the hot path, `<meta http-equiv='refresh' content='10'>` for live
+  clock. Sections: big UTC time, client status, server status, Force
+  resync button, recent-clients table (sourced from the rate-limit LRU,
+  capped at 16 rows). 3.4 KB body.
+- **mDNS `_ntp._udp` service advertisement** — substitutes for DHCP
+  option 42 (which ESP-IDF's DHCP server doesn't expose for arbitrary
+  option codes). Avahi-aware clients (macOS, iOS, ChromeOS, Linux Avahi)
+  auto-discover the broker as a time source. Verified live: PTR query
+  to `224.0.0.251:5353` -> 120 B response from the device.
+- **`Time (NTP)` section in `/settings`** — live sync state, client +
+  server enable checkboxes, three upstream slots, poll interval, POSIX
+  TZ. Saved through the existing "save = confirm + reboot" flow.
+- **Integration test suite** — `test_ntp.py` (13 tests) + `test_broker.py`
+  (116 tests) cover the new endpoints, MQTT topics, defensive guards
+  (oversize/undersize/bad-mode/rate-limit drops), and mDNS discovery.
+  `make test` runs both against any live device.
 
-Measured device-vs-host offset: **—332 ms** against a separately-synced host
-clock; drift from `pool.ntp.org` directly is well below 50 ms.
+Not in 0.7.0 (deferred): drift compensation while free-running, manual
+`POST /api/time/set` for air-gapped installs, `CONFIG_NTP_BROADCAST`
+periodic broadcasts, real DHCP option 42 (needs an IDF lwip patch).
 
-Not in this release (Phase 2/3/4): SNTP server on UDP :123, DHCP option 42
-advertise-self, `/time` portal page, manual `POST /api/time/set`.
+Development iterations [`CHANGELOG-v0.7.0-rc1.md`](CHANGELOG-v0.7.0-rc1.md)
+/ [`-rc2.md`](CHANGELOG-v0.7.0-rc2.md) / [`-rc3.md`](CHANGELOG-v0.7.0-rc3.md)
+document what shipped per phase.
 
 ## What's new in 0.6.6 (portal latency: A + E + F)
 
@@ -276,26 +253,161 @@ the device is reachable as `<hostname>.local` without needing to know its IP.
 
 The broker includes a Tasmota-style web UI accessible at the device's IP address on port 80.
 
-<p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="Main dashboard" width="340" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/information.png" alt="Information page" width="340" />
-</p>
-<p align="center">
-  <em>Left: Main dashboard with status and navigation. Right: Information page with full device details.</em>
-</p>
+<!-- Screenshot carousel: GitHub doesn't render JavaScript, so this is a
+     static grid + collapsible sections. Click any thumbnail to view full
+     size. Captures are regenerated from the live device via
+     `make captures` -- see tools/capture_portal.py et al. -->
 
-> **Refreshing screenshots.** All portal captures in `docs/screenshots/` are
-> generated by `tools/capture_portal.py` (Playwright). Point it at any live
-> device and it will write both the legacy flat images used above and a full
-> desktop + mobile set into `docs/screenshots/ux-audit/`:
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/ux-audit/dashboard_desktop.png">
+        <img src="docs/screenshots/ux-audit/dashboard_desktop.png" width="100%" alt="Dashboard" />
+      </a>
+      <br/><sub><b>Dashboard</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/ux-audit/time_desktop.png">
+        <img src="docs/screenshots/ux-audit/time_desktop.png" width="100%" alt="Time / NTP" />
+      </a>
+      <br/><sub><b>Time / NTP</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/ux-audit/settings_desktop.png">
+        <img src="docs/screenshots/ux-audit/settings_desktop.png" width="100%" alt="Settings" />
+      </a>
+      <br/><sub><b>Settings</b></sub>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary><b>More screenshots</b> &mdash; click to expand</summary>
+
+### Live device monitoring
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/ux-audit/clients_desktop.png">
+        <img src="docs/screenshots/ux-audit/clients_desktop.png" width="100%" alt="Connected Clients" />
+      </a>
+      <br/><sub>Connected MQTT + WiFi AP clients, live in-place refresh every 3s.</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/ux-audit/information_desktop.png">
+        <img src="docs/screenshots/ux-audit/information_desktop.png" width="100%" alt="Information" />
+      </a>
+      <br/><sub>Read-only device info: chip, MAC, PSRAM, firmware, partitions.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/tester_desktop.png">
+        <img src="docs/screenshots/ux-audit/tester_desktop.png" width="100%" alt="MQTT Tester" />
+      </a>
+      <br/><sub>WebSocket-backed MQTT tester: publish (QoS 0/1, retain), subscribe with real wildcard matching.</sub>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/firmware_update_desktop.png">
+        <img src="docs/screenshots/ux-audit/firmware_update_desktop.png" width="100%" alt="Firmware Update" />
+      </a>
+      <br/><sub>OTA: file upload, URL fetch (http+https), manual rollback to the other partition.</sub>
+    </td>
+  </tr>
+</table>
+
+### Setup, save &amp; reboot
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/ux-audit/wifi_config_desktop.png">
+        <img src="docs/screenshots/ux-audit/wifi_config_desktop.png" width="100%" alt="WiFi Configuration" />
+      </a>
+      <br/><sub>Captive-portal first-boot WiFi setup. Saves + reboots in one click.</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/ux-audit/save_reboot_confirm.png">
+        <img src="docs/screenshots/ux-audit/save_reboot_confirm.png" width="100%" alt="Save & Reboot confirm prompt" />
+      </a>
+      <br/><sub>Every settings change asks before triggering a reboot.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/rebooting_offline.png">
+        <img src="docs/screenshots/ux-audit/rebooting_offline.png" width="100%" alt="Reboot countdown - offline" />
+      </a>
+      <br/><sub>Reboot countdown page: polls /api/ping (open, no auth required), pulses orange while device is down.</sub>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/save_reboot_countdown.png">
+        <img src="docs/screenshots/ux-audit/save_reboot_countdown.png" width="100%" alt="Save & reboot countdown" />
+      </a>
+      <br/><sub>After saving: <code>Saved. Polling device — will redirect home when it comes back online.</code></sub>
+    </td>
+  </tr>
+</table>
+
+### Mobile views (390 × 844 @ 2x)
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/ux-audit/dashboard_mobile.png">
+        <img src="docs/screenshots/ux-audit/dashboard_mobile.png" width="100%" alt="Dashboard (mobile)" />
+      </a>
+      <br/><sub>Dashboard</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/ux-audit/time_mobile.png">
+        <img src="docs/screenshots/ux-audit/time_mobile.png" width="100%" alt="Time / NTP (mobile)" />
+      </a>
+      <br/><sub>Time / NTP</sub>
+    </td>
+    <td align="center" width="33%">
+      <a href="docs/screenshots/ux-audit/settings_mobile.png">
+        <img src="docs/screenshots/ux-audit/settings_mobile.png" width="100%" alt="Settings (mobile)" />
+      </a>
+      <br/><sub>Settings</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/clients_mobile.png">
+        <img src="docs/screenshots/ux-audit/clients_mobile.png" width="100%" alt="Clients (mobile)" />
+      </a>
+      <br/><sub>Clients</sub>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/tester_mobile.png">
+        <img src="docs/screenshots/ux-audit/tester_mobile.png" width="100%" alt="Tester (mobile)" />
+      </a>
+      <br/><sub>Tester</sub>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/ux-audit/firmware_update_mobile.png">
+        <img src="docs/screenshots/ux-audit/firmware_update_mobile.png" width="100%" alt="Firmware Update (mobile)" />
+      </a>
+      <br/><sub>Firmware Update</sub>
+    </td>
+  </tr>
+</table>
+
+</details>
+
+> **Refreshing screenshots.** All captures are reproducible from any live
+> device with `make captures` (uses `tools/capture_*.py`, Playwright). Set
+> `PORTAL_URL` and `PORTAL_AUTH` env vars to target a non-default device:
 >
 > ```bash
-> PORTAL_URL=http://192.168.22.100 python3 tools/capture_portal.py
+> PORTAL_URL=http://192.168.22.100 PORTAL_AUTH=admin:secret make captures
 > ```
 >
-> See [`plan-mqtt-ux-v2.md`](plan-mqtt-ux-v2.md) for the current UX audit
-> backed by those captures.
+> Credentials are read in-process only — never written to commits or
+> embedded in any PNG. See [`plan-mqtt-ux-v2.md`](plan-mqtt-ux-v2.md) for
+> the UX audit those captures back.
 
 ### Main Dashboard (`/`)
 
@@ -418,31 +530,31 @@ The update page also shows current firmware information (version, build date, ID
 
 ### All Endpoints
 
-| Path               | Method | Description                                                                                                              |
-| ------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `/`                | GET    | Main dashboard with live stats                                                                                           |
-| `/clients`         | GET    | Connected MQTT + WiFi AP clients (live, in-place refresh)                                                                |
-| `/settings`        | GET    | Settings form (MQTT, retain, AP)                                                                                         |
-| `/config`          | GET    | WiFi configuration form                                                                                                  |
-| `/update`          | GET    | Firmware update page (upload + URL)                                                                                      |
-| `/ota-upload`      | POST   | OTA firmware upload (multipart/form-data)                                                                                |
-| `/ota-url`         | POST   | OTA firmware fetch from URL (`http://` or `https://`)                                                                    |
-| `/ota-rollback`    | POST   | Switch boot partition to the other OTA slot and reboot                                                                   |
-| `/rebooting`       | GET    | Standalone reboot countdown page (read-only, no reboot)                                                                  |
-| `/api/ping`        | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
-| `/api/time`        | GET    | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.                             |
-| `/api/time/resync` | POST   | Gated. Force an immediate upstream poll.                                                                                 |
-| UDP :123           | —      | SNTPv4 server. Stratum 16/LI=3 (alarm) when unsynced, stratum 3 once synced. Per-source rate limit, anti-amplification.  |
-| `/time`            | GET    | Tasmota-style page: live clock, client+server status, force-resync button, recent-clients table.                         |
-| mDNS `_ntp._udp`   | UDP/5353 | Service advertisement so Avahi-aware clients auto-discover the broker as a time source.                                |
-| `/save-settings`   | POST   | Save broker/AP settings to NVS                                                                                           |
-| `/save`            | POST   | Save WiFi credentials                                                                                                    |
-| `/clear`           | GET    | Clear saved WiFi credentials                                                                                             |
-| `/reconnect`       | GET    | Reconnect to saved WiFi                                                                                                  |
-| `/ap-toggle`       | GET    | Toggle AP mode                                                                                                           |
-| `/reboot`          | GET    | Reboot the device                                                                                                        |
-| `/api/status`      | GET    | JSON API — broker stats, firmware version                                                                                |
-| `/api/clients`     | GET    | JSON API — connected MQTT + WiFi AP clients                                                                              |
+| Path               | Method   | Description                                                                                                              |
+| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `/`                | GET      | Main dashboard with live stats                                                                                           |
+| `/clients`         | GET      | Connected MQTT + WiFi AP clients (live, in-place refresh)                                                                |
+| `/settings`        | GET      | Settings form (MQTT, retain, AP)                                                                                         |
+| `/config`          | GET      | WiFi configuration form                                                                                                  |
+| `/update`          | GET      | Firmware update page (upload + URL)                                                                                      |
+| `/ota-upload`      | POST     | OTA firmware upload (multipart/form-data)                                                                                |
+| `/ota-url`         | POST     | OTA firmware fetch from URL (`http://` or `https://`)                                                                    |
+| `/ota-rollback`    | POST     | Switch boot partition to the other OTA slot and reboot                                                                   |
+| `/rebooting`       | GET      | Standalone reboot countdown page (read-only, no reboot)                                                                  |
+| `/api/ping`        | GET      | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
+| `/api/time`        | GET      | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.                             |
+| `/api/time/resync` | POST     | Gated. Force an immediate upstream poll.                                                                                 |
+| UDP :123           | —        | SNTPv4 server. Stratum 16/LI=3 (alarm) when unsynced, stratum 3 once synced. Per-source rate limit, anti-amplification.  |
+| `/time`            | GET      | Tasmota-style page: live clock, client+server status, force-resync button, recent-clients table.                         |
+| mDNS `_ntp._udp`   | UDP/5353 | Service advertisement so Avahi-aware clients auto-discover the broker as a time source.                                  |
+| `/save-settings`   | POST     | Save broker/AP settings to NVS                                                                                           |
+| `/save`            | POST     | Save WiFi credentials                                                                                                    |
+| `/clear`           | GET      | Clear saved WiFi credentials                                                                                             |
+| `/reconnect`       | GET      | Reconnect to saved WiFi                                                                                                  |
+| `/ap-toggle`       | GET      | Toggle AP mode                                                                                                           |
+| `/reboot`          | GET      | Reboot the device                                                                                                        |
+| `/api/status`      | GET      | JSON API — broker stats, firmware version                                                                                |
+| `/api/clients`     | GET      | JSON API — connected MQTT + WiFi AP clients                                                                              |
 
 ## Configuration
 
@@ -468,7 +580,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                              |
 | ------------------------- | --------------- | ----------------------------------------------------------------- |
-| Firmware version          | 0.7.0-rc3       | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Firmware version          | 0.7.0           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
 | Max clients               | 100             | `mqtt_broker.h`                                                   |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |
@@ -634,18 +746,36 @@ main/
 
 ## Testing
 
-The project includes a comprehensive Python test suite that tests all features against a live broker instance.
+The project includes a comprehensive Python test suite that runs all
+features against a live broker instance. There is no host-build of the
+firmware today; tests target the real radio + Ethernet stack on a
+flashed device.
 
-### Run Tests
+### Run tests
 
 ```bash
-pip install paho-mqtt requests
+pip install paho-mqtt requests ntplib jsonschema
 
-# Run against default host (AP mode)
-python3 test_broker.py
+# Everything (MQTT + NTP), against default host (192.168.22.100):
+make test
 
-# Run against a specific host
+# Just NTP (13 tests; SNTP client+server, mDNS, /api/time, /time page,
+# defensive guards on UDP:123):
+BROKER_HOST=192.168.22.100 make test-ntp
+
+# Just MQTT broker (116 tests; protocol + portal + retained + QoS 1 etc.):
+BROKER_HOST=192.168.22.100 make test-broker
+
+# If the portal has Basic Auth on:
+BROKER_AUTH=admin:secret make test
+
+# Destructive cycle (POST /save-settings; reboots the device 2-3 times;
+# ~2 min extra). Skipped by default in the fast suite.
+BROKER_TEST_DESTRUCTIVE=1 make test
+
+# Raw invocations (skip the Makefile):
 python3 test_broker.py 192.168.1.100 1883
+BROKER_HOST=192.168.1.100 python3 test_ntp.py
 ```
 
 ### Test Coverage
