@@ -981,11 +981,18 @@ static void handle_http_client(int client_fd)
         int pos = snprintf(body, PAGE_BUF_SIZE,
 "<style>"
 ".tester{font-family:sans-serif}"
-".row{display:flex;gap:8px;align-items:center;margin:4px 0}"
+".row{display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap}"
 ".row label{min-width:80px}"
-".row input[type=text],.row textarea{flex:1;padding:4px}"
+".row input[type=text],.row textarea{flex:1 1 200px;min-width:120px;padding:4px}"
+/* The .btn rule in the page-level stylesheet pins anchors/buttons to
+ * width:100%, which collapsed sibling inputs in the tester's flex rows to
+ * a ~5px sliver. Constrain tester buttons specifically so the filter input
+ * keeps a sane width. */
+".tester .row button.btn{width:auto;flex:0 0 auto;padding:0 14px;line-height:2rem;font-size:1rem}"
+".tester .row .opt{flex:0 0 auto;min-width:0}"
 ".st-conn{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.85em}"
 ".st-on{background:#2a7;color:#fff}.st-off{background:#a33;color:#fff}"
+".bc{font-size:.75em;color:#888;margin-left:6px}"
 "#log{font-family:monospace;font-size:.85em;background:#1a1a1a;color:#eaeaea;"
 "padding:8px;height:380px;overflow:auto;border:1px solid #444}"
 "#log .msg{border-bottom:1px solid #333;padding:2px 0}"
@@ -996,15 +1003,19 @@ static void handle_http_client(int client_fd)
 "<h3>MQTT Tester <span id='conn' class='st-conn st-off'>disconnected</span></h3>"
 "<fieldset><legend>&nbsp;Publish&nbsp;</legend>"
 "<div class='row'><label>Topic</label><input id='ptopic' type='text' maxlength='128' placeholder='home/light/1'></div>"
-"<div class='row'><label>Payload</label><textarea id='ppayload' rows='2' maxlength='256'></textarea></div>"
+"<div class='row'><label>Payload <span id='pbc' class='bc'>0/1024</span></label>"
+"<textarea id='ppayload' rows='2' maxlength='1024'></textarea></div>"
 "<div class='row'><label>Options</label>"
-"<label><input type='checkbox' id='pretain'> retain</label>"
+"<label class='opt'>QoS <select id='pqos' style='padding:2px'>"
+"<option value='0'>0</option><option value='1'>1</option></select></label>"
+"<label class='opt'><input type='checkbox' id='pretain'> retain</label>"
 "<button id='pbtn' class='btn'>Publish</button>"
 "<span id='perr' style='color:#f33;margin-left:8px'></span>"
 "</div></fieldset>"
 "<fieldset><legend>&nbsp;Subscribe (all topics)&nbsp;</legend>"
-"<div class='row'><label>Filter</label><input id='filter' type='text' placeholder='substring match, supports + and # as substring'>"
-"<label><input type='checkbox' id='showsys'> show $SYS/</label>"
+"<div class='row'><label>Filter</label>"
+"<input id='filter' type='text' placeholder='MQTT filter, e.g. home/# or home/+/temp'>"
+"<label class='opt'><input type='checkbox' id='showsys'> show $SYS/</label>"
 "<button id='pause' class='btn'>Pause</button>"
 "<button id='clear' class='btn'>Clear</button>"
 "</div>"
@@ -1020,8 +1031,24 @@ static void handle_http_client(int client_fd)
 "var filterEl=document.getElementById('filter');"
 "var showsys=document.getElementById('showsys');"
 "function setConn(on){conn.textContent=on?'connected':'disconnected';conn.className='st-conn '+(on?'st-on':'st-off');}"
-"function matchFilter(t){var f=filterEl.value.trim();if(!showsys.checked&&t.indexOf('$SYS/')===0)return false;if(!f)return true;"
-"if(f.indexOf('#')>=0||f.indexOf('+')>=0){f=f.replace(/#/g,'').replace(/\\+/g,'');}return t.indexOf(f)>=0;}"
+/* Real MQTT topic-filter matching, per MQTT 3.1.1 §4.7. The previous
+ * implementation lied: it advertised + and # support but stripped those
+ * chars and did substring match. Now + matches exactly one level,
+ * # matches the remainder. Falls back to substring when the input has no
+ * wildcards/slashes so casual users keep the easy mode. */
+"function topicMatch(filter,topic){if(!filter)return true;"
+"var f=filter.split('/'),t=topic.split('/');"
+"for(var i=0;i<f.length;i++){"
+"if(f[i]==='#')return true;"
+"if(i>=t.length)return false;"
+"if(f[i]==='+')continue;"
+"if(f[i]!==t[i])return false;}"
+"return f.length===t.length;}"
+"function matchFilter(t){var f=filterEl.value.trim();"
+"if(!showsys.checked&&t.indexOf('$SYS/')===0)return false;"
+"if(!f)return true;"
+"if(f.indexOf('/')>=0||f.indexOf('+')>=0||f.indexOf('#')>=0){return topicMatch(f,t);}"
+"return t.indexOf(f)>=0;}"
 "function render(){logEl.innerHTML='';for(var i=msgs.length-1;i>=0;i--){var m=msgs[i];if(!matchFilter(m.t))continue;"
 "var d=document.createElement('div');d.className='msg';"
 "var ts=document.createElement('span');ts.className='ts';ts.textContent=m.ts+' ';d.appendChild(ts);"
@@ -1040,10 +1067,14 @@ static void handle_http_client(int client_fd)
 "ws.onopen=function(){setConn(true);reconnectMs=2000;};"
 "ws.onmessage=onMsg;ws.onerror=function(){};ws.onclose=function(){setConn(false);scheduleReconnect();};}"
 "function scheduleReconnect(){setTimeout(connect,reconnectMs);reconnectMs=Math.min(reconnectMs*2,backoffMax);}"
-"document.getElementById('pbtn').onclick=function(){var t=document.getElementById('ptopic').value;var p=document.getElementById('ppayload').value;var r=document.getElementById('pretain').checked;var err=document.getElementById('perr');err.textContent='';"
+"var payEl=document.getElementById('ppayload');"
+"var pbcEl=document.getElementById('pbc');"
+"function updateBc(){pbcEl.textContent=payEl.value.length+'/1024';}"
+"payEl.addEventListener('input',updateBc);updateBc();"
+"document.getElementById('pbtn').onclick=function(){var t=document.getElementById('ptopic').value;var p=payEl.value;var r=document.getElementById('pretain').checked;var q=parseInt(document.getElementById('pqos').value,10)||0;var err=document.getElementById('perr');err.textContent='';"
 "if(!t){err.textContent='topic required';return;}if(t.indexOf('#')>=0||t.indexOf('+')>=0){err.textContent='no wildcards in publish topic';return;}"
 "if(!ws||ws.readyState!==1){err.textContent='not connected';return;}"
-"ws.send(JSON.stringify({action:'publish',topic:t,payload:p,retain:r}));};"
+"ws.send(JSON.stringify({action:'publish',topic:t,payload:p,retain:r,qos:q}));};"
 "document.getElementById('pause').onclick=function(){paused=!paused;this.textContent=paused?'Resume':'Pause';};"
 "document.getElementById('clear').onclick=function(){msgs=[];render();};"
 "filterEl.oninput=render;showsys.onchange=render;"
@@ -1054,7 +1085,10 @@ static void handle_http_client(int client_fd)
     } else if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/index.html") == 0) {
         int pos = 0;
 
-        /* WiFi status banner */
+        /* Connectivity check: prefer Ethernet, then STA WiFi, then AP-only fallback.
+         * Don't show the orange "AP mode" warning when we already have a usable
+         * uplink (Ethernet or STA) -- it implies the device needs setup when it
+         * doesn't. AP status is reported as informational when it's the only path. */
         int sta_connected = 0, ap_running = 0;
         char ip_str[16] = "";
         char ssid_str[33] = "";
@@ -1062,29 +1096,30 @@ static void handle_http_client(int client_fd)
         portal_get_sta_status(&sta_connected, &ap_running, ip_str, sizeof(ip_str),
                                ssid_str, sizeof(ssid_str));
 
-        if (sta_connected) {
+        int eth_up = 0;
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
+        char eth_ip[16] = "";
+        eth_up = eth_is_connected();
+        if (eth_up) eth_get_ip_str(eth_ip, sizeof(eth_ip));
+#endif
+
+        if (eth_up) {
+#ifdef CONFIG_MQTT_BROKER_ETHERNET
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                "<div class='st ok'>WiFi connected — %s (%s)</div>", ssid_str, ip_str);
+                "<div class='st ok'>Online \xc2\xb7 Ethernet %s (%s)</div>",
+                eth_ip, eth_napt_is_enabled() ? "NAPT on" : "NAPT off");
+#endif
+            if (sta_connected) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<div class='st ok'>WiFi \xc2\xb7 %s (%s)</div>", ssid_str, ip_str);
+            }
+        } else if (sta_connected) {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<div class='st ok'>Online \xc2\xb7 WiFi %s (%s)</div>", ssid_str, ip_str);
         } else {
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                "<div class='st warn'>AP mode — connect to configure WiFi</div>");
+                "<div class='st warn'>Setup \xc2\xb7 AP mode @ %s</div>", ip_str);
         }
-
-#ifdef CONFIG_MQTT_BROKER_ETHERNET
-        {
-            char eth_ip[16] = "";
-            int eth_up = eth_is_connected();
-            if (eth_up) {
-                eth_get_ip_str(eth_ip, sizeof(eth_ip));
-                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                    "<div class='st ok'>Ethernet — %s (%s)</div>",
-                    eth_ip, eth_napt_is_enabled() ? "NAPT on" : "NAPT off");
-            } else {
-                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                    "<div class='st warn'>Ethernet — disconnected</div>");
-            }
-        }
-#endif
 
         /* Broker quick stats */
         broker_stats_t stats;
@@ -1219,20 +1254,33 @@ static void handle_http_client(int client_fd)
         }
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table></fieldset>");
 
-        /* AP config */
+        /* AP config.
+         *
+         * Password is NEVER rendered in plaintext on the information page or
+         * sent inside the HTML source. The portal previously embedded
+         * `mqtt1234` (or the user-set value) in the response body, which any
+         * device on the same LAN could read with a single GET. Now we only
+         * indicate whether the AP is using its factory-default password so
+         * users know whether they need to change it. The actual value is only
+         * accessible after explicit POST via /settings (see Phase 4 plan). */
         char ap_ssid[33] = "mqtt-broker";
         char ap_pass[65] = "mqtt1234";
         char ap_ip_info[16] = "";
         nvs_settings_get_str("ap_ssid", ap_ssid, sizeof(ap_ssid), "mqtt-broker");
         nvs_settings_get_str("ap_pass", ap_pass, sizeof(ap_pass), "mqtt1234");
         wifi_get_ap_ip_str(ap_ip_info, sizeof(ap_ip_info));
+        int ap_pass_is_default = (strcmp(ap_pass, "mqtt1234") == 0);
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Access Point&nbsp;</legend><table>"
             "<tr><th>AP SSID</th><td>%s</td></tr>"
             "<tr><th>AP Password</th><td>%s</td></tr>"
             "<tr><th>AP IP</th><td>%s</td></tr>"
             "</table></fieldset>",
-            ap_ssid, ap_pass, ap_ip_info);
+            ap_ssid,
+            ap_pass_is_default
+                ? "<span style='color:#ffcc80'>set (factory default \xe2\x80\x94 change in Configuration)</span>"
+                : "<span style='color:#a5d6a7'>set (custom)</span>",
+            ap_ip_info);
 
         /* Device / firmware info */
         esp_chip_info_t chip;
@@ -1271,7 +1319,16 @@ static void handle_http_client(int client_fd)
     } else if (strcmp(req.path, "/settings") == 0) {
         int pos = 0;
 
-        /* Load current settings */
+        /* Load current settings.
+         *
+         * IMPORTANT: passwords (auth_pass, ap_pass) are intentionally never
+         * echoed back into the form HTML. The previous version put the actual
+         * value into <input value='...'>, which made it readable via View
+         * Source on the page. Instead the inputs render empty with a
+         * placeholder "unchanged \xe2\x80\x94 leave blank to keep" and the
+         * /save-settings handler treats an empty submission as "keep current".
+         * We DO still load auth_pass / ap_pass so we can show whether they are
+         * currently set, but we never put the value into the response. */
         char auth_user[65] = "";
         char auth_pass[65] = "";
         char ap_ssid[33] = "mqtt-broker";
@@ -1284,6 +1341,13 @@ static void handle_http_client(int client_fd)
         nvs_settings_get_str("ap_pass", ap_pass, sizeof(ap_pass), "mqtt1234");
         char hostname[33] = "";
         portal_get_hostname(hostname, sizeof(hostname));
+        int auth_pass_set = (auth_pass[0] != '\0');
+        int ap_pass_is_default = (strcmp(ap_pass, "mqtt1234") == 0);
+        /* Wipe the secret values out of the local buffers as soon as we're
+         * done deciding what to render -- belt-and-braces against the
+         * compiler re-using these stack slots later in the same function. */
+        memset(auth_pass, 0, sizeof(auth_pass));
+        memset(ap_pass, 0, sizeof(ap_pass));
 
         /* Device / network identity */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
@@ -1296,18 +1360,25 @@ static void handle_http_client(int client_fd)
             "</fieldset>",
             hostname);
 
-        /* MQTT settings */
+        /* MQTT settings.
+         * Auth password input is rendered empty -- the /save-settings handler
+         * treats an empty `auth_pass` field as "keep current value". To clear
+         * the password, also clear `auth_user` (which disables auth entirely),
+         * or POST `auth_pass_clear=1`. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;MQTT Broker&nbsp;</legend>"
             "<label>MQTT Port</label>"
             "<input type='number' name='mqtt_port' value='%u' min='1' max='65535'>"
             "<label>Auth Username (blank = disabled)</label>"
             "<input type='text' name='auth_user' value='%s' placeholder='Leave empty to disable'>"
-            "<label>Auth Password</label>"
-            "<input type='password' name='auth_pass' value='%s' placeholder='Password'>"
+            "<label>Auth Password %s</label>"
+            "<input type='password' name='auth_pass' value='' placeholder='%s' autocomplete='new-password'>"
             "<label>Buffer Size (bytes, recv and send)</label>"
             "<input type='number' name='buf_size' value='%u' min='1024' max='65536' step='1024'>",
-            mqtt_port, auth_user, auth_pass, buf_size);
+            mqtt_port, auth_user,
+            auth_pass_set ? "(currently set)" : "(not set)",
+            auth_pass_set ? "unchanged \xe2\x80\x94 leave blank to keep" : "Password",
+            buf_size);
 
         /* Retained message settings */
         uint8_t retain_en = nvs_settings_get_u8("retain_en", 1);
@@ -1324,7 +1395,12 @@ static void handle_http_client(int client_fd)
             "<input type='number' name='retain_ttl_h' value='%d' min='0' max='8760'>",
             retain_en ? "checked" : "", retain_ttl_hours);
 
-        /* AP settings in same form */
+        /* AP settings in same form.
+         * AP password is rendered empty (not echoed back). Empty submission
+         * keeps the existing value -- so the `required` constraint is removed
+         * to make saving other AP fields possible without re-typing the
+         * password every time. minlength still enforces 8 chars when the user
+         * does choose to change it. */
         {
             char ap_ip_val[16] = "";
             wifi_get_ap_ip_str(ap_ip_val, sizeof(ap_ip_val));
@@ -1333,15 +1409,20 @@ static void handle_http_client(int client_fd)
                 "<fieldset><legend>&nbsp;Access Point&nbsp;</legend>"
                 "<label>AP SSID</label>"
                 "<input type='text' name='ap_ssid' value='%s' placeholder='mqtt-broker' required maxlength='32'>"
-                "<label>AP Password (min 8 chars)</label>"
-                "<input type='password' name='ap_pass' value='%s' placeholder='mqtt1234' "
-                "minlength='8' maxlength='63' required "
-                "title='AP password must be 8-63 characters'>"
+                "<label>AP Password %s</label>"
+                "<input type='password' name='ap_pass' value='' placeholder='%s' "
+                "minlength='8' maxlength='63' "
+                "title='AP password must be 8-63 characters' autocomplete='new-password'>"
                 "<label>AP IP Address (requires reboot)</label>"
                 "<input type='text' name='ap_ip' value='%s' "
                 "pattern='[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' "
                 "title='IPv4 address like 192.168.25.1'>",
-                ap_ssid, ap_pass, ap_ip_val);
+                ap_ssid,
+                ap_pass_is_default
+                    ? "<span style='color:#ffcc80'>(factory default \xe2\x80\x94 please change)</span>"
+                    : "(currently set)",
+                "unchanged \xe2\x80\x94 leave blank to keep",
+                ap_ip_val);
         }
 
 #ifdef CONFIG_MQTT_BROKER_ETHERNET
@@ -1401,8 +1482,17 @@ static void handle_http_client(int client_fd)
             ESP_LOGI(TAG, "Saved auth user: '%s'", val);
         }
         if (urldecode_param(req.body, "auth_pass", val, sizeof(val))) {
-            nvs_settings_set_str("auth_pass", val);
-            ESP_LOGI(TAG, "Saved auth pass (len=%d)", (int)strlen(val));
+            /* Empty value means "keep current password". Use auth_pass_clear=1
+             * (or clear auth_user) to actually remove a stored password. */
+            if (val[0] != '\0') {
+                nvs_settings_set_str("auth_pass", val);
+                ESP_LOGI(TAG, "Saved auth pass (len=%d)", (int)strlen(val));
+            } else if (strstr(req.body, "auth_pass_clear=1")) {
+                nvs_settings_set_str("auth_pass", "");
+                ESP_LOGI(TAG, "Cleared auth pass on explicit request");
+            } else {
+                ESP_LOGI(TAG, "Auth pass unchanged (empty submission)");
+            }
         }
         if (urldecode_param(req.body, "ap_ssid", val, sizeof(val))) {
             if (val[0]) {
@@ -1411,7 +1501,12 @@ static void handle_http_client(int client_fd)
             }
         }
         if (urldecode_param(req.body, "ap_pass", val, sizeof(val))) {
-            if (strlen(val) >= 8) {
+            /* Empty value means "keep current AP password" -- the form input is
+             * rendered without value= so we don't leak the stored value. A
+             * non-empty value must still satisfy the 8-char minimum. */
+            if (val[0] == '\0') {
+                ESP_LOGI(TAG, "AP pass unchanged (empty submission)");
+            } else if (strlen(val) >= 8) {
                 nvs_settings_set_str("ap_pass", val);
                 ESP_LOGI(TAG, "Saved AP pass (len=%d)", (int)strlen(val));
             } else {
@@ -1649,10 +1744,66 @@ static void handle_http_client(int client_fd)
         }
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</fieldset>");
 
+        /* In-place refresh via /api/clients polling.
+         *
+         * Previously this page did setTimeout(location.reload, 5000), which:
+         *   - destroyed text selection and scroll position every 5s,
+         *   - re-rendered ~4 KB of HTML on the ESP32 each cycle,
+         *   - made the page unusable while reading a long client list.
+         *
+         * Now we fetch the JSON, patch the table bodies in place, pause when
+         * the tab is hidden (visibilitychange), and show last-updated and live
+         * status text the user can actually trust. A <noscript> fallback still
+         * does a hard reload for JS-disabled clients. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<p style='color:#888;font-size:0.85em;text-align:center'>"
-            "Page auto-refreshes every 5 seconds</p>"
-            "<script>setTimeout(function(){location.reload();},5000);</script>"
+            "Live <span id='lupd'>--</span> "
+            "<button type='button' id='liveBtn' "
+            "style='background:#444;color:#eaeaea;border:1px solid #666;"
+            "border-radius:3px;padding:2px 8px;font-size:.85em;cursor:pointer;width:auto'>"
+            "pause</button></p>"
+            "<noscript><meta http-equiv='refresh' content='5'></noscript>"
+            "<script>(function(){"
+            "var live=true,paused=false,timer=null,IVL=3000;"
+            "var lupd=document.getElementById('lupd');"
+            "var btn=document.getElementById('liveBtn');"
+            "function fmtHMS(s){var h=Math.floor(s/3600),m=Math.floor((s%%3600)/60),x=s%%60;"
+            "return h+'h '+m+'m '+x+'s';}"
+            "function ts(){var d=new Date();var p=function(n){return(n<10?'0':'')+n;};"
+            "return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}"
+            "function paint(d){"
+            "var mt=document.querySelector('fieldset:first-of-type legend');"
+            "if(mt){mt.innerHTML='\\u00a0MQTT Clients ('+d.mqtt.length+')\\u00a0';}"
+            "var rows=[];d.mqtt.sort(function(a,b){"
+            "var aa=parseInt((a.ip||'').split('.').pop(),10)||0;"
+            "var bb=parseInt((b.ip||'').split('.').pop(),10)||0;return aa-bb;});"
+            "for(var i=0;i<d.mqtt.length;i++){var c=d.mqtt[i];"
+            "var tr=document.createElement('tr');"
+            "var cid=c.client_id||'(empty)';"
+            "tr.innerHTML='<td></td><td><a target=\"_blank\" rel=\"noopener\"></a></td>'+"
+            "'<td></td><td></td><td></td><td></td><td></td><td></td>';"
+            "var td=tr.children;"
+            "td[0].textContent=cid;"
+            "td[1].firstChild.textContent=c.ip;td[1].firstChild.href='http://'+c.ip+'/';"
+            "td[2].textContent=fmtHMS(c.connected_s);"
+            "td[3].textContent=c.last_active_s+'s ago';"
+            "td[4].textContent=c.subs;"
+            "td[5].textContent=c.inflight;"
+            "td[6].textContent=c.published;"
+            "td[7].textContent=c.keep_alive+'s';"
+            "rows.push(tr);}"
+            "var tbl=document.querySelector('fieldset:first-of-type table');"
+            "if(tbl){var hdr=tbl.rows[0];tbl.innerHTML='';tbl.appendChild(hdr);"
+            "for(var j=0;j<rows.length;j++)tbl.appendChild(rows[j]);}"
+            "lupd.textContent='\\u00b7 last update '+ts();}"
+            "function poll(){if(!live||paused)return;"
+            "fetch('/api/clients',{cache:'no-store'}).then(function(r){return r.json();})"
+            ".then(paint).catch(function(){lupd.textContent='\\u00b7 error \\u2014 retrying';});}"
+            "function tick(){poll();timer=setTimeout(tick,IVL);}"
+            "document.addEventListener('visibilitychange',function(){"
+            "if(document.hidden){live=false;}else{live=true;poll();}});"
+            "btn.onclick=function(){paused=!paused;btn.textContent=paused?'resume':'pause';if(!paused)poll();};"
+            "tick();})();</script>"
             "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
@@ -1718,15 +1869,47 @@ static void handle_http_client(int client_fd)
         const esp_app_desc_t *app = esp_app_get_description();
         const esp_partition_t *running = esp_ota_get_running_partition();
 
+        /* Inspect the inactive OTA slot so we can offer a manual rollback
+         * button when it holds a valid app. We do NOT enable bootloader
+         * automatic rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) here --
+         * adding that without also wiring an in-app self-test would brick
+         * users on first upgrade. Manual rollback is the safe middle ground. */
+        const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+        esp_app_desc_t other_desc;
+        bool other_valid =
+            (other && esp_ota_get_partition_description(other, &other_desc) == ESP_OK);
+
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Firmware Information&nbsp;</legend><table>"
             "<tr><th>Current Version</th><td>" FW_VERSION "</td></tr>"
             "<tr><th>Build Date</th><td>" __DATE__ " " __TIME__ "</td></tr>"
             "<tr><th>IDF Version</th><td>%s</td></tr>"
             "<tr><th>Running Partition</th><td>%s</td></tr>"
+            "<tr><th>Other Partition</th><td>%s%s%s%s</td></tr>"
             "</table></fieldset>",
             app->idf_ver,
-            running ? running->label : "unknown");
+            running ? running->label : "unknown",
+            other ? other->label : "<em>none</em>",
+            other_valid ? " \xe2\x80\x94 " : "",
+            other_valid ? other_desc.version : (other ? " (empty or invalid)" : ""),
+            other_valid && other_desc.project_name[0] ? "" : "");
+
+        /* Rollback panel -- only when the inactive slot has a valid app. */
+        if (other_valid) {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<fieldset><legend>&nbsp;Rollback&nbsp;</legend>"
+                "<p>Switch the boot partition to <b>%s</b> (%s %s) and reboot. "
+                "Use this if the current firmware misbehaves. The current image "
+                "stays in flash so you can switch back the same way.</p>"
+                "<form method='POST' action='/ota-rollback' "
+                "onsubmit=\"return confirm('Roll back to ' + '%s' + ' and reboot?')\">"
+                "<button type='submit' class='btn bgry'>Roll back &amp; Reboot</button>"
+                "</form></fieldset>",
+                other->label,
+                other_desc.project_name[0] ? other_desc.project_name : FW_NAME,
+                other_desc.version,
+                other_desc.version);
+        }
 
         /* File upload form */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
@@ -1777,13 +1960,19 @@ static void handle_http_client(int client_fd)
             "</script>"
             "</fieldset>");
 
-        /* URL-based OTA */
+        /* URL-based OTA.
+         *
+         * Both http:// and https:// are accepted. https:// uses the ESP-IDF
+         * default TLS stack with system CA bundle (when configured); on a
+         * trusted LAN plain http is usually fine. The HTML5 pattern was
+         * previously `http://.*` which silently blocked https — confusing
+         * users with self-hosted release servers behind TLS. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;OTA Update via URL&nbsp;</legend>"
             "<form method='POST' action='/ota-url' id='urlform'>"
-            "<label>Firmware URL (http:// only)</label>"
+            "<label>Firmware URL (http:// or https://)</label>"
             "<input type='url' name='url' placeholder='http://192.168.1.100:8080/firmware.bin' "
-            "required pattern='http://.*'>"
+            "required pattern='https?://.*'>"
             "<br><button type='submit' class='bgrn'>Download &amp; Flash</button>"
             "</form></fieldset>");
 
@@ -1852,18 +2041,74 @@ static void handle_http_client(int client_fd)
         http_response_start(client_fd, "200 OK", "application/json", len);
         http_send_body(client_fd, json, len);
 
+    /* ============ OTA ROLLBACK ============
+     * Sets the boot partition to the *other* OTA slot (if it has a valid
+     * app) and reboots. Implements manual rollback without requiring
+     * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE. Idempotent: pressing twice
+     * just bounces the user between slots. */
+    } else if (strcmp(req.path, "/ota-rollback") == 0 && req.method == REQ_POST) {
+        const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+        esp_app_desc_t other_desc;
+        if (!other || esp_ota_get_partition_description(other, &other_desc) != ESP_OK) {
+            int len = snprintf(body, PAGE_BUF_SIZE,
+                "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                "<meta http-equiv='refresh' content='3;url=/update'></head>"
+                "<body style='font-family:sans-serif;padding:40px;text-align:center;"
+                "background:#252525;color:#eaeaea'>"
+                "<h2>No rollback target</h2>"
+                "<p>The other partition is empty or invalid.</p></body></html>");
+            http_response_start(client_fd, "400 Bad Request", "text/html; charset=utf-8", len);
+            http_send_body(client_fd, body, len);
+        } else {
+            esp_err_t rerr = esp_ota_set_boot_partition(other);
+            if (rerr != ESP_OK) {
+                ESP_LOGE(TAG, "Rollback set_boot failed: %s", esp_err_to_name(rerr));
+                int len = snprintf(body, PAGE_BUF_SIZE,
+                    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    "<meta http-equiv='refresh' content='3;url=/update'></head>"
+                    "<body style='font-family:sans-serif;padding:40px;text-align:center;"
+                    "background:#252525;color:#eaeaea'>"
+                    "<h2>Rollback failed</h2><p>%s</p></body></html>",
+                    esp_err_to_name(rerr));
+                http_response_start(client_fd, "500 Internal Server Error", "text/html; charset=utf-8", len);
+                http_send_body(client_fd, body, len);
+            } else {
+                ESP_LOGW(TAG, "OTA rollback to %s (%s) on user request",
+                         other->label, other_desc.version);
+                int len = snprintf(body, PAGE_BUF_SIZE,
+                    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    "<title>Rolling back</title>"
+                    "<meta http-equiv='refresh' content='12;url=/'></head>"
+                    "<body style='font-family:sans-serif;padding:40px;text-align:center;"
+                    "background:#252525;color:#eaeaea'>"
+                    "<h2>Rolling back to %s</h2>"
+                    "<p>Rebooting into the previous firmware. Reconnect in a few seconds.</p>"
+                    "</body></html>",
+                    other_desc.version);
+                http_response_start(client_fd, "200 OK", "text/html; charset=utf-8", len);
+                http_send_body(client_fd, body, len);
+                free(body);
+                close(client_fd);
+                vTaskDelay(pdMS_TO_TICKS(800));
+                esp_restart();
+                return;
+            }
+        }
+
     /* ============ OTA VIA URL ============ */
     } else if (strcmp(req.path, "/ota-url") == 0 && req.method == REQ_POST) {
         char url[256] = "";
         urldecode_param(req.body, "url", url, sizeof(url));
 
-        if (url[0] == '\0' || strncmp(url, "http://", 7) != 0) {
+        if (url[0] == '\0' ||
+            (strncmp(url, "http://",  7) != 0 &&
+             strncmp(url, "https://", 8) != 0)) {
             int len = snprintf(body, PAGE_BUF_SIZE,
                 "<!DOCTYPE html><html><head><meta charset='utf-8'>"
                 "<meta http-equiv='refresh' content='3;url=/update'>"
                 "</head><body style='font-family:sans-serif;padding:40px;text-align:center;"
                 "background:#252525;color:#eaeaea'>"
-                "<h2>Invalid URL</h2><p>Must start with http://</p>"
+                "<h2>Invalid URL</h2><p>Must start with http:// or https://</p>"
                 "</body></html>");
             http_response_start(client_fd, "400 Bad Request", "text/html; charset=utf-8", len);
             http_send_body(client_fd, body, len);

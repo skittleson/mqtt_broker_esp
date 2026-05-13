@@ -7,9 +7,9 @@
 #define VERSION_H
 
 #define FW_VERSION_MAJOR  0
-#define FW_VERSION_MINOR  5
+#define FW_VERSION_MINOR  6
 #define FW_VERSION_PATCH  0
-#define FW_VERSION        "0.5.0"
+#define FW_VERSION        "0.6.0"
 #define FW_NAME           "mqtt_broker"
 
 #endif /* VERSION_H */

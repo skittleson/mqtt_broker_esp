@@ -130,7 +130,11 @@ int broker_get_clients(broker_client_info_t *out, int max_out);
 /* Hard caps for tester. Keep small to bound RAM and risk. */
 #define BROKER_TESTER_MAX_CONSUMERS    2
 #define BROKER_TESTER_MAX_TOPIC_LEN    128
-#define BROKER_TESTER_MAX_PAYLOAD_LEN  256
+/* Bumped from 256 to 1024 in 0.6.0: the web tester needs to send/receive
+ * real-world payloads (sensor JSON, config blobs). Each queued event adds
+ * ~768 bytes; with BROKER_TESTER_MAX_CONSUMERS=2 and a small stream buffer
+ * depth that's well under 50 KB total. */
+#define BROKER_TESTER_MAX_PAYLOAD_LEN  1024
 
 /* Wire format for messages handed from broker -> WS consumer via stream buffer.
  * Stored back-to-back, each preceded by its length (handled by StreamBuffer
