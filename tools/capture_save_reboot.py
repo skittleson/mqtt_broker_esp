@@ -17,6 +17,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get("PORTAL_URL", "http://192.168.22.100").rstrip("/")
+AUTH = os.environ.get("PORTAL_AUTH", "").strip()
 OUT = Path(__file__).resolve().parent.parent / "docs" / "screenshots" / "ux-audit"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -29,24 +30,33 @@ CONFIRM_MSG = (
 def main():
     with sync_playwright() as pw:
         b = pw.chromium.launch()
-        ctx = b.new_context(viewport={"width": 1024, "height": 1050})
+        if AUTH and ":" in AUTH:
+            u, _, p = AUTH.partition(":")
+            ctx = b.new_context(
+                viewport={"width": 1024, "height": 1050},
+                http_credentials={"username": u, "password": p},
+            )
+        else:
+            ctx = b.new_context(viewport={"width": 1024, "height": 1050})
         page = ctx.new_page()
 
         # 1. Countdown view, retitled to match the /save-settings flow.
-        page.route("**/api/status", lambda r: r.abort())
+        # Block /api/ping (new in 0.6.4 -- the unauthenticated liveness
+        # endpoint that replaced /api/status for polling).
+        page.route("**/api/ping", lambda r: r.abort())
         page.goto(BASE + "/rebooting", wait_until="domcontentloaded")
         page.evaluate(
             "document.title='Saving and rebooting';"
             "document.querySelector('h2').textContent='Saving and rebooting';"
             "document.querySelector('.sub').textContent="
-            "'Settings written. The device is restarting; reconnect in about 10 seconds.';"
+            "'Saved. Polling device \\u2014 will redirect home when it comes back online.';"
         )
         page.wait_for_timeout(2200)
         page.screenshot(path=str(OUT / "save_reboot_countdown.png"), full_page=True)
         print(f"  save_reboot_countdown.png written")
 
         # 2. Settings form with synthesized confirm-dialog overlay.
-        page.unroute("**/api/status")
+        page.unroute("**/api/ping")
         page.goto(BASE + "/settings", wait_until="domcontentloaded")
         page.wait_for_timeout(300)
         # Scroll the Save button into view so the overlay covers it

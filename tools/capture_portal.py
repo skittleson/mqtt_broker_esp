@@ -7,6 +7,12 @@ Usage:
 
 Writes desktop (1024x) and mobile (390x844) PNGs into docs/screenshots/.
 Also refreshes the legacy flat names used by README.md.
+
+Optional auth (when the portal has Basic Auth enabled):
+    PORTAL_URL=... PORTAL_AUTH=user:password python3 tools/capture_portal.py
+
+The AUTH env var is read in-process only -- never written to commits or
+image files. Use a throwaway credential when committing PRs.
 """
 import os
 import sys
@@ -15,6 +21,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get("PORTAL_URL", "http://192.168.22.100").rstrip("/")
+AUTH = os.environ.get("PORTAL_AUTH", "").strip()
 OUT = Path(__file__).resolve().parent.parent / "docs" / "screenshots"
 AUDIT = OUT / "ux-audit"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -39,11 +46,15 @@ VIEWPORTS = [
 
 def grab(pw, viewport_name, width, height, dsf):
     browser = pw.chromium.launch()
-    ctx = browser.new_context(
-        viewport={"width": width, "height": height},
-        device_scale_factor=dsf,
-        ignore_https_errors=True,
-    )
+    ctx_kwargs = {
+        "viewport": {"width": width, "height": height},
+        "device_scale_factor": dsf,
+        "ignore_https_errors": True,
+    }
+    if AUTH and ":" in AUTH:
+        u, _, p = AUTH.partition(":")
+        ctx_kwargs["http_credentials"] = {"username": u, "password": p}
+    ctx = browser.new_context(**ctx_kwargs)
     page = ctx.new_page()
     results = []
     for url_path, slug, legacy, wait_ms, _sel in PAGES:

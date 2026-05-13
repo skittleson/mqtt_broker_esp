@@ -31,6 +31,15 @@
 
 ---
 
+## What's new in 0.6.4
+
+- **`GET /api/ping` (open, auth-exempt) replaces `/api/status` as the reboot-countdown poll endpoint.** Solves a real bug for users running with Basic Auth on: every poll of `/api/status` hit the 401 challenge, browsers dropped cached creds across the network-error -> 401 cycle that occurs during a reboot, and the native auth dialog reopened over and over. `/api/ping` returns only `{"uptime_s":N}` (no settings, no network info, no firmware version), so making it open is safe. `/api/status` and `/api/clients` stay gated.
+- **Countdown polling treats *any* HTTP response as 'device alive'.** The previous logic required a 2xx and rejected on 401/5xx, which would have falsely classified an authenticated endpoint as offline. Now: network error/abort = offline, any received status = alive (with uptime-regression cross-check as a tiebreaker for sub-1s reboots).
+- **Subtitle reworded** per user feedback: `Saved. Polling device — will redirect home when it comes back online.` Replaces the older `Settings written. The device is restarting; reconnect in about 10 seconds.`
+- **Auto-redirect lowered 800 ms → 400 ms** so the dashboard appears almost instantly after the device returns.
+- **`fetch()` polling uses `credentials:'omit'`** as belt-and-braces — even if `/api/ping` were ever moved behind auth by mistake, the browser would still not pop a credential prompt from the countdown page.
+- **`tools/capture_*.py` learn `PORTAL_AUTH=user:password`** (env-only, never written to commits or images). Lets the screenshot pipeline keep working against an auth-on portal.
+
 ## What's new in 0.6.3
 
 - **Settings save = confirm + reboot + countdown.** `/settings` and `/config` (WiFi credentials) now end with a green `Save & Reboot` button. Submitting fires a browser `confirm()` dialog with the exact wording of what will happen; on OK the server persists every field to NVS, serves the reboot-countdown page (same JS as `GET /reboot` and `POST /ota-rollback`), and restarts. The user lands on the countdown automatically, watches the offline→online transition, and gets dropped on a working dashboard — no more "saved but unclear which settings need a reboot" guesswork.
@@ -325,6 +334,7 @@ The update page also shows current firmware information (version, build date, ID
 | `/ota-url`       | POST   | OTA firmware fetch from URL (`http://` or `https://`)     |
 | `/ota-rollback`  | POST   | Switch boot partition to the other OTA slot and reboot    |
 | `/rebooting`     | GET    | Standalone reboot countdown page (read-only, no reboot)   |
+| `/api/ping`      | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
 | `/save-settings` | POST   | Save broker/AP settings to NVS                            |
 | `/save`          | POST   | Save WiFi credentials                                     |
 | `/clear`         | GET    | Clear saved WiFi credentials                              |
@@ -358,7 +368,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                              |
 | ------------------------- | --------------- | ----------------------------------------------------------------- |
-| Firmware version          | 0.6.3           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Firmware version          | 0.6.4           | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
 | Max clients               | 100             | `mqtt_broker.h`                                                   |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |
