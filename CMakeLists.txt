@@ -18,6 +18,11 @@ if(_version_h MATCHES "#define[ \t]+FW_VERSION[ \t]+\"([^\"]+)\"")
     set(PROJECT_VER "${CMAKE_MATCH_1}")
     message(STATUS "mqtt_broker: PROJECT_VER=${PROJECT_VER} (from main/version.h)")
 endif()
+# Re-run configure automatically whenever version.h changes, so bumping
+# FW_VERSION doesn't silently re-use the cached PROJECT_VER from a previous
+# build (which would embed the wrong version in esp_app_desc_t).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_SOURCE_DIR}/main/version.h")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(mqtt_broker)

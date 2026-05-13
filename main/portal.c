@@ -1551,15 +1551,35 @@ static void handle_http_client(int client_fd)
         }
 #endif
 
+        /* The Save button triggers a reboot so changes apply uniformly
+         * (MQTT port, auth credentials, retained-message toggle, NAPT, AP
+         * config -- the previous "some take effect immediately, some need a
+         * reboot" split was a source of confusion). Confirm runs before the
+         * POST is dispatched, so cancelling really cancels: nothing is
+         * written to NVS. After confirmation the /save-settings handler
+         * persists every field, then serves the reboot-countdown page and
+         * restarts the device. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "</fieldset>"
-            "<br><button type='submit' class='bgrn'>Save</button>"
+            "<p style='color:#aaa;font-size:0.85em;margin-top:8px'>"
+            "Saving will reboot the device so all changes take effect uniformly. "
+            "Reconnect in about 10 seconds.</p>"
+            "<button type='submit' class='bgrn' "
+            "onclick=\"return confirm('Save settings and reboot? The device will "
+            "restart and should be reachable again in about 10 seconds.')\">"
+            "Save &amp; Reboot</button>"
             "</form>"
             "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 
-    /* ============ SAVE SETTINGS ============ */
+    /* ============ SAVE SETTINGS ============
+     * Persists every field, then serves the reboot-countdown page and
+     * restarts the device. The previous flow redirected to /settings with
+     * no feedback, requiring users to manually find the Restart button --
+     * and not every setting was honored without a reboot anyway (MQTT port,
+     * buffer size, retained-message toggle, AP password all needed one).
+     * Unified to "always reboot" matches user expectation. */
     } else if (strcmp(req.path, "/save-settings") == 0 && req.method == REQ_POST) {
         char val[65];
 
@@ -1649,30 +1669,37 @@ static void handle_http_client(int client_fd)
         }
 
 #ifdef CONFIG_MQTT_BROKER_ETHERNET
-        /* NAPT toggle — checkbox absent means unchecked (disabled).
-         * Apply immediately without reboot. */
+        /* NAPT toggle -- checkbox absent means unchecked (disabled).
+         * NVS-only here; the eth subsystem reads NVS on boot and applies
+         * the desired state. (Previously this also called eth_napt_enable()
+         * / eth_napt_disable() to take effect immediately, but with the
+         * unified "save = reboot" flow that's redundant -- the reboot below
+         * re-applies it cleanly from NVS.) */
         {
             uint8_t napt_en = (strstr(req.body, "napt_en=1") != NULL) ? 1 : 0;
-            uint8_t napt_was = nvs_settings_get_u8("napt_en", 1);
             nvs_settings_set_u8("napt_en", napt_en);
-
-            if (napt_en != napt_was && eth_is_connected()) {
-                if (napt_en) {
-                    eth_napt_enable();
-                } else {
-                    eth_napt_disable();
-                }
-            }
             ESP_LOGI(TAG, "Saved NAPT enabled: %d", napt_en);
         }
 #endif
 
-        http_send_redirect(client_fd, "/settings");
+        ESP_LOGW(TAG, "Settings saved; rebooting on user request");
+        http_send_reboot_countdown(client_fd,
+            "Saving and rebooting",
+            "Settings written. The device is restarting; reconnect in about 10 seconds.",
+            "/");
+        free(body);
+        close(client_fd);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+        return;  /* not reached */
 
     /* ============ WIFI CONFIG PAGE ============ */
     } else if (strcmp(req.path, "/config") == 0) {
         int pos = 0;
 
+        /* Same "save = reboot" pattern as /settings -- the WiFi stack picks
+         * up new STA credentials cleanly on boot, and a reboot is the
+         * simplest way to guarantee a fresh association attempt. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;WiFi Configuration&nbsp;</legend>"
             "<form method='POST' action='/save'>"
@@ -1685,7 +1712,13 @@ static void handle_http_client(int client_fd)
             "<p><label style='font-weight:normal'>"
             "<input type='checkbox' name='ap_mode' value='1' %s> "
             "Enable AP mode alongside WiFi</label></p>"
-            "<br><button type='submit' class='bgrn'>Save</button>"
+            "<p style='color:#aaa;font-size:0.85em;margin-top:8px'>"
+            "Saving will reboot the device to apply the new WiFi credentials. "
+            "Reconnect in about 10 seconds.</p>"
+            "<button type='submit' class='bgrn' "
+            "onclick=\"return confirm('Save WiFi credentials and reboot? The device will "
+            "restart and try to associate with the new network.')\">"
+            "Save &amp; Reboot</button>"
             "</form></fieldset>"
             "<br><a href='/' class='btn'>Main Menu</a>",
             s_portal_ap_mode ? "checked" : "");
@@ -1704,9 +1737,25 @@ static void handle_http_client(int client_fd)
             ESP_LOGW(TAG, "WiFi save rejected: SSID empty or password too short");
             http_send_redirect(client_fd, "/config");
         } else {
-            ESP_LOGI(TAG, "Saving WiFi: SSID='%s', ap_mode=%d", ssid, ap_mode);
+            ESP_LOGI(TAG, "Saving WiFi: SSID='%s', ap_mode=%d (rebooting)", ssid, ap_mode);
             portal_save_wifi(ssid, password, ap_mode);
-            http_send_redirect(client_fd, "/");
+            /* Match the /save-settings flow: reboot so the WiFi stack comes
+             * up fresh with the new credentials. The captive portal first-
+             * boot user is on the AP -- after the device reboots they may
+             * lose AP connectivity if STA succeeds, so the countdown page's
+             * back-online detection may never fire on their phone. They
+             * still get a clean "Device offline, will resume when it
+             * returns..." indicator and the meta-refresh fallback. */
+            char subtitle[128];
+            snprintf(subtitle, sizeof(subtitle),
+                     "Saved credentials for %.32s. Reconnecting...", ssid);
+            http_send_reboot_countdown(client_fd,
+                "Saving and rebooting", subtitle, "/");
+            free(body);
+            close(client_fd);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
+            return;  /* not reached */
         }
 
     /* ============ CLEAR WIFI ============ */
