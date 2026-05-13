@@ -31,6 +31,30 @@
 
 ---
 
+## What's new in 0.7.0-rc3 (NTP Phase 3: `/time` page + mDNS discovery)
+
+Finishes the user-visible part of the NTP feature.
+
+- **New `/time` portal page.** Server-rendered, no JS in the hot path,
+  `<meta http-equiv='refresh' content='10'>` for hands-free clock updates.
+  Shows a big UTC clock (green when synced, orange when not), client +
+  server status cards, a `Force resync` button, and a recent-clients
+  table sourced from the SNTP server's rate-limit LRU. Dashboard gets a
+  new `Time / NTP` button between `MQTT Tester` and `Information`.
+- **mDNS `_ntp._udp` service advertisement.** Substitutes for DHCP option
+  42 — ESP-IDF's DHCP server only emits the fixed `dhcps_offer_option`
+  set (router + DNS); adding arbitrary option codes would need an IDF
+  patch. mDNS gives equivalent auto-discovery on Avahi-aware clients
+  (macOS, iOS, ChromeOS, Linux Avahi). Verified live with a direct query
+  to `224.0.0.251:5353` — device responds with a 120 B record containing
+  `_ntp._udp.local`.
+- **Per-source `total` counter** on the rate-limit LRU. Free piggyback
+  observability; surfaced via `ntp_get_recent_clients()` and the new
+  `/time` table.
+
+Acceptance criteria #1–4 all met now. #5 (`make test-ntp` CI) remains
+deferred to a Phase 0 follow-up.
+
 ## What's new in 0.7.0-rc2 (NTP Phase 2: SNTP server)
 
 The broker is now a complete time source. Any LAN client can point at the
@@ -49,7 +73,7 @@ device and sync from it.
   published every 10 s. New MQTT subscribers see the latest values
   immediately on connect.
 - **Settings page** gets a second status line (`server · serving on UDP:123
-  · stratum 3 · 8 served · dropped 0/2/1`) and an independent
+· stratum 3 · 8 served · dropped 0/2/1`) and an independent
   `Enable SNTP server` checkbox.
 - **`/api/time`** picks up `server_running`, `stratum`, `served`, and
   `dropped.{rate,size,mode}` fields. Same auth-exempt path as Phase 1.
@@ -408,7 +432,9 @@ The update page also shows current firmware information (version, build date, ID
 | `/api/ping`        | GET    | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
 | `/api/time`        | GET    | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.                             |
 | `/api/time/resync` | POST   | Gated. Force an immediate upstream poll.                                                                                 |
-| UDP :123           | —      | SNTPv4 server. Stratum 16/LI=3 (alarm) when unsynced, stratum 3 once synced. Per-source rate limit, anti-amplification.   |
+| UDP :123           | —      | SNTPv4 server. Stratum 16/LI=3 (alarm) when unsynced, stratum 3 once synced. Per-source rate limit, anti-amplification.  |
+| `/time`            | GET    | Tasmota-style page: live clock, client+server status, force-resync button, recent-clients table.                         |
+| mDNS `_ntp._udp`   | UDP/5353 | Service advertisement so Avahi-aware clients auto-discover the broker as a time source.                                |
 | `/save-settings`   | POST   | Save broker/AP settings to NVS                                                                                           |
 | `/save`            | POST   | Save WiFi credentials                                                                                                    |
 | `/clear`           | GET    | Clear saved WiFi credentials                                                                                             |
@@ -442,7 +468,7 @@ These settings are configurable from the web UI at `/settings` and persisted in 
 
 | Setting                   | Default         | File                                                              |
 | ------------------------- | --------------- | ----------------------------------------------------------------- |
-| Firmware version          | 0.7.0-rc2       | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
+| Firmware version          | 0.7.0-rc3       | `version.h` (mirrored into IDF `PROJECT_VER` by `CMakeLists.txt`) |
 | Default hostname          | `mqtt_broker`   | `Kconfig.projbuild` (`MQTT_BROKER_HOSTNAME`)                      |
 | Max clients               | 100             | `mqtt_broker.h`                                                   |
 | Max subscriptions         | 2,048           | `mqtt_broker.h`                                                   |
