@@ -260,12 +260,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting MQTT broker...");
     broker_start();
 
-    /* Start SNTP client (Phase 1 of plan-ntp-server.md). Safe to call
-     * before a default route is fully ready -- esp_sntp queues queries
-     * internally and fires them once DNS resolves the upstreams. The
-     * SNTP server (Phase 2) is not started here. */
-    ESP_LOGI(TAG, "Starting SNTP client...");
+    /* Start SNTP client + server (Phases 1 and 2 of plan-ntp-server.md).
+     * Both honour NVS namespace `ntp`: `enabled` is the master switch,
+     * `srv_enabled` independently disables the server alone (useful for
+     * STA-only nodes that just want their own clock synced). The server
+     * is safe to start before the client has synced -- it answers with
+     * stratum 16 / LI=3 (alarm) until real time is available, which
+     * RFC-compliant clients ignore. */
+    ESP_LOGI(TAG, "Starting SNTP client + server...");
     ntp_init();
+    ntp_server_start();
 
     ESP_LOGI(TAG, "=== ESP32 MQTT Broker ready ===");
 }

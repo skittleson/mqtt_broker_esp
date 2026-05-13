@@ -62,7 +62,12 @@ typedef struct {
     int64_t  last_sync_age_s;   /* Seconds since last_sync_us, or -1 if never. */
     char     upstream_used[NTP_UPSTREAM_MAX_LEN]; /* Hostname of the responder. */
     uint32_t sync_count;        /* Total successful upstream syncs since boot. */
-    bool     server_running;    /* False for Phase 1 -- placeholder for Phase 2. */
+    bool     server_running;    /* True once the SNTP server task has bound :123. */
+    uint8_t  stratum;           /* What our server advertises: 16 unsynced, else 2..15. */
+    uint32_t served;            /* Total SNTP responses sent since boot. */
+    uint32_t dropped_rate;      /* Per-source rate-limit drops. */
+    uint32_t dropped_size;      /* Packets dropped for length out-of-range. */
+    uint32_t dropped_mode;      /* Packets dropped for unsupported mode. */
 } ntp_state_t;
 
 /* Settings struct used by the portal to render the form and persist edits.
@@ -91,6 +96,13 @@ void ntp_get_settings(ntp_settings_t *out);
  * NVS or no netif has a default route. The result of the poll arrives
  * asynchronously some hundreds of ms later via the sync callback. */
 bool ntp_force_resync(void);
+
+/* Starts the SNTP server task (Phase 2 of plan-ntp-server.md). Binds UDP
+ * 0.0.0.0:123 and answers SNTPv4 requests. Idempotent; safe to call from
+ * main after netifs are up. Honours the `srv_enabled` flag in NVS
+ * namespace `ntp` (default 1). Returns true if the task started (or was
+ * already running), false if disabled or socket bind failed. */
+bool ntp_server_start(void);
 
 #ifdef __cplusplus
 }

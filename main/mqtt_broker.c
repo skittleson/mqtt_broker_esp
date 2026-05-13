@@ -1525,23 +1525,66 @@ static void broker_task(void *arg)
             last_keepalive_check = now;
         }
 
-        /* $SYS/broker/time publisher (Phase 1 of plan-ntp-server.md).
-         * Only fires once SNTP has synced -- pre-sync we'd be publishing
-         * '0' which is worse than nothing. Cadence: every 10s, matching
-         * the plan. handle_publish_internal does the fanout exactly like
-         * an external publisher would, so subscribers using a $SYS-aware
-         * filter (#, $SYS/#, $SYS/broker/time) all receive it. */
-        if (ntp_is_synced() && (now - last_sys_time) > 10000) {
-            int64_t epoch_us = ntp_now_us();
-            if (epoch_us > 0) {
-                char payload[24];
-                int pl = snprintf(payload, sizeof(payload), "%lld",
+        /* $SYS/broker/{time,ntp/...} publishers (plan-ntp-server.md).
+         *
+         * Cadence: every 10s while NTP is synced. handle_publish_internal
+         * does the fanout exactly like an external publisher, so
+         * subscribers with $SYS/# or $SYS/broker/+ filters all receive it.
+         *
+         *   $SYS/broker/time          non-retained, ASCII epoch seconds.
+         *                              Skipped when unsynced (would be 0).
+         *   $SYS/broker/ntp/synced    retained, "1"/"0". New subscribers
+         *                              learn the sync state immediately.
+         *   $SYS/broker/ntp/stratum   retained, ASCII 2..16.
+         *   $SYS/broker/ntp/served    retained, total SNTP responses we've
+         *                              sent since boot. Lets dashboards
+         *                              alert on broker reboot loops via
+         *                              the counter going backward.
+         *
+         * The retained ones republish every 10s rather than only on edge
+         * because we don't track "last published value" -- the retain
+         * store dedupes by topic, so the cost is just one fanout pass and
+         * one NVS-RAM update per cycle. */
+        if ((now - last_sys_time) > 10000) {
+            char payload[24];
+            int pl;
+            if (ntp_is_synced()) {
+                int64_t epoch_us = ntp_now_us();
+                if (epoch_us > 0) {
+                    pl = snprintf(payload, sizeof(payload), "%lld",
                                   (long long)(epoch_us / 1000000));
-                static const char topic[] = "$SYS/broker/time";
+                    static const char topic[] = "$SYS/broker/time";
+                    handle_publish_internal(topic, (uint16_t)(sizeof(topic) - 1),
+                                            (const uint8_t *)payload, (uint32_t)pl,
+                                            /*retain=*/false, /*pub_qos=*/0);
+                }
+            }
+            /* ntp/synced (retained) */
+            {
+                pl = snprintf(payload, sizeof(payload), "%d",
+                              ntp_is_synced() ? 1 : 0);
+                static const char topic[] = "$SYS/broker/ntp/synced";
                 handle_publish_internal(topic, (uint16_t)(sizeof(topic) - 1),
-                                        (const uint8_t *)payload,
-                                        (uint32_t)pl,
-                                        /*retain=*/false, /*pub_qos=*/0);
+                                        (const uint8_t *)payload, (uint32_t)pl,
+                                        /*retain=*/true, /*pub_qos=*/0);
+            }
+            /* ntp/stratum + ntp/served (retained) -- pull both via
+             * ntp_get_state() to keep the snapshot coherent. */
+            {
+                ntp_state_t st;
+                ntp_get_state(&st);
+                pl = snprintf(payload, sizeof(payload), "%u",
+                              (unsigned)st.stratum);
+                static const char tstratum[] = "$SYS/broker/ntp/stratum";
+                handle_publish_internal(tstratum, (uint16_t)(sizeof(tstratum) - 1),
+                                        (const uint8_t *)payload, (uint32_t)pl,
+                                        /*retain=*/true, /*pub_qos=*/0);
+                pl = snprintf(payload, sizeof(payload), "%u",
+                              (unsigned)st.served);
+                static const char tserved[] = "$SYS/broker/ntp/served";
+                handle_publish_internal(tserved, (uint16_t)(sizeof(tserved) - 1),
+                                        (const uint8_t *)payload, (uint32_t)pl,
+                                        /*retain=*/true, /*pub_qos=*/0);
             }
             last_sys_time = now;
         }

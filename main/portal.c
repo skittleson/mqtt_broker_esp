@@ -1626,6 +1626,16 @@ static void handle_http_client(int client_fd)
             ntp_get_settings(&ns);
             ntp_state_t nstate;
             ntp_get_state(&nstate);
+            /* Server-enable mirror -- ntp_get_settings() doesn't expose
+             * srv_enabled today; read it directly. Default ON per plan. */
+            uint8_t srv_en = 1;
+            {
+                nvs_handle_t snh;
+                if (nvs_open("ntp", NVS_READONLY, &snh) == ESP_OK) {
+                    nvs_get_u8(snh, "srv_enabled", &srv_en);
+                    nvs_close(snh);
+                }
+            }
             char sync_summary[96];
             if (nstate.synced) {
                 snprintf(sync_summary, sizeof(sync_summary),
@@ -1637,13 +1647,31 @@ static void handle_http_client(int client_fd)
                 snprintf(sync_summary, sizeof(sync_summary),
                          "<span style='color:#ffcc80'>not yet synced</span>");
             }
+            char server_summary[160];
+            if (nstate.server_running) {
+                snprintf(server_summary, sizeof(server_summary),
+                         "<span style='color:#a5d6a7'>serving</span> on UDP:123 \xc2\xb7 "
+                         "stratum %u \xc2\xb7 %u served \xc2\xb7 dropped %u/%u/%u (rate/size/mode)",
+                         (unsigned)nstate.stratum,
+                         (unsigned)nstate.served,
+                         (unsigned)nstate.dropped_rate,
+                         (unsigned)nstate.dropped_size,
+                         (unsigned)nstate.dropped_mode);
+            } else {
+                snprintf(server_summary, sizeof(server_summary),
+                         "<span style='color:#888'>server off</span>");
+            }
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                 "</fieldset>"
                 "<fieldset><legend>&nbsp;Time (NTP)&nbsp;</legend>"
-                "<p style='color:#aaa;font-size:0.85em;margin:0 0 6px 0'>%s</p>"
+                "<p style='color:#aaa;font-size:0.85em;margin:0'>client \xc2\xb7 %s</p>"
+                "<p style='color:#aaa;font-size:0.85em;margin:0 0 6px 0'>server \xc2\xb7 %s</p>"
                 "<p><label style='font-weight:normal'>"
                 "<input type='checkbox' name='ntp_en' value='1' %s> "
                 "Enable SNTP client</label></p>"
+                "<p><label style='font-weight:normal'>"
+                "<input type='checkbox' name='ntp_srv_en' value='1' %s> "
+                "Enable SNTP server (UDP:123) \xe2\x80\x94 LAN clients can sync from this device</label></p>"
                 "<label>Upstream 1</label>"
                 "<input type='text' name='ntp_up0' value='%s' maxlength='63' placeholder='pool.ntp.org'>"
                 "<label>Upstream 2 (optional)</label>"
@@ -1654,8 +1682,9 @@ static void handle_http_client(int client_fd)
                 "<input type='number' name='ntp_poll' value='%u' min='64' max='86400'>"
                 "<label>Timezone (POSIX TZ, e.g. UTC0 or PST8PDT,M3.2.0,M11.1.0)</label>"
                 "<input type='text' name='ntp_tz' value='%s' maxlength='63'>",
-                sync_summary,
+                sync_summary, server_summary,
                 ns.enabled ? "checked" : "",
+                srv_en ? "checked" : "",
                 ns.upstreams[0], ns.upstreams[1], ns.upstreams[2],
                 (unsigned)ns.poll_s, ns.tz);
         }
@@ -1801,6 +1830,10 @@ static void handle_http_client(int client_fd)
                 uint8_t ntp_en = (strstr(req.body, "ntp_en=1") != NULL) ? 1 : 0;
                 nvs_set_u8(nh, "enabled", ntp_en);
                 ESP_LOGI(TAG, "Saved NTP enabled: %d", ntp_en);
+
+                uint8_t srv_en = (strstr(req.body, "ntp_srv_en=1") != NULL) ? 1 : 0;
+                nvs_set_u8(nh, "srv_enabled", srv_en);
+                ESP_LOGI(TAG, "Saved NTP server enabled: %d", srv_en);
 
                 if (urldecode_param(req.body, "ntp_up0", val, sizeof(val))) {
                     nvs_set_str(nh, "upstream_0", val);
@@ -2341,15 +2374,27 @@ static void handle_http_client(int client_fd)
         }
         host_esc[oi] = '\0';
         char *json = body;
+        /* Server-side fields (stratum, served, dropped_*) are zero in
+         * pre-Phase-2 builds; populated once ntp_server_start() succeeds.
+         * Splitting client and server sub-objects keeps the JSON
+         * self-documenting and lets dashboards distinguish 'we have time'
+         * from 'we provide time'. */
         int len = snprintf(json, PAGE_BUF_SIZE,
             "{\"synced\":%s,\"epoch_us\":%lld,\"last_sync_age_s\":%lld,"
-            "\"sync_count\":%u,\"upstream\":\"%s\",\"server_running\":%s}",
+            "\"sync_count\":%u,\"upstream\":\"%s\","
+            "\"server_running\":%s,\"stratum\":%u,\"served\":%u,"
+            "\"dropped\":{\"rate\":%u,\"size\":%u,\"mode\":%u}}",
             st.synced ? "true" : "false",
             (long long)st.epoch_us,
             (long long)st.last_sync_age_s,
             (unsigned)st.sync_count,
             host_esc,
-            st.server_running ? "true" : "false");
+            st.server_running ? "true" : "false",
+            (unsigned)st.stratum,
+            (unsigned)st.served,
+            (unsigned)st.dropped_rate,
+            (unsigned)st.dropped_size,
+            (unsigned)st.dropped_mode);
         http_response_start(client_fd, "200 OK", "application/json", len);
         http_send_body(client_fd, json, len);
 
