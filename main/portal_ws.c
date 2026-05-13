@@ -699,9 +699,13 @@ bool portal_ws_handle_upgrade(int fd, const char *raw_headers, size_t raw_len)
         return false;
     }
 
-    /* Spawn the task; it now owns fd, sb, slot, and ctx. */
-    BaseType_t rc = xTaskCreate(ws_task, "portal_ws", WS_TASK_STACK,
-                                ctx, WS_TASK_PRIO, NULL);
+    /* Spawn the task; it now owns fd, sb, slot, and ctx.
+     * Pinned to CPU 0 so it shares an affinity domain with portal_http
+     * (also CPU 0 since 0.6.5). Keeps WS traffic off CPU 1 where the
+     * MQTT broker runs. See docs/portal-latency-analysis.md. */
+    BaseType_t rc = xTaskCreatePinnedToCore(ws_task, "portal_ws",
+                                            WS_TASK_STACK, ctx,
+                                            WS_TASK_PRIO, NULL, 0);
     if (rc != pdPASS) {
         broker_tester_unregister(ctx->broker_slot);
         vStreamBufferDelete(ctx->sb);

@@ -34,6 +34,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"  /* esp_timer_get_time() for the per-request access log */
 #include "esp_mac.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
@@ -944,8 +945,24 @@ static void handle_ota_url(int client_fd, const char *url)
 
 static void handle_http_client(int client_fd)
 {
+    /* Per-request access log: capture start time so we can print method,
+     * path, and elapsed-ms at every termination point. Helps diagnose the
+     * 'sometimes slow' tail (see docs/portal-latency-analysis.md). The
+     * method/path are filled in after http_parse() succeeds; until then
+     * the log uses placeholders so even malformed/aborted requests get
+     * accounted for. */
+    int64_t req_start_us = esp_timer_get_time();
+    const char *req_method = "?";
+    const char *req_path = "?";
+
     char *buf = (char *)malloc(2048);
-    if (!buf) { close(client_fd); return; }
+    if (!buf) {
+        ESP_LOGW(TAG, "http  %s %s  ENOMEM  %lldms",
+                 req_method, req_path,
+                 (esp_timer_get_time() - req_start_us) / 1000);
+        close(client_fd);
+        return;
+    }
     int total = 0;
 
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
@@ -960,7 +977,14 @@ static void handle_http_client(int client_fd)
         if (strstr(buf, "\r\n\r\n")) break;
     }
 
-    if (total <= 0) { free(buf); close(client_fd); return; }
+    if (total <= 0) {
+        ESP_LOGW(TAG, "http  %s %s  recv_fail  %lldms",
+                 req_method, req_path,
+                 (esp_timer_get_time() - req_start_us) / 1000);
+        free(buf);
+        close(client_fd);
+        return;
+    }
 
     /* Check for OTA upload early — before we consume the body.
      * For multipart POST to /ota-upload, hand off the socket to the
@@ -1055,6 +1079,10 @@ static void handle_http_client(int client_fd)
     http_parse((const uint8_t *)buf, (size_t)total, &req);
     free(buf);  /* done with recv buffer */
 
+    /* Now we have a parsed request -- update access-log identifiers. */
+    req_method = (req.method == REQ_GET) ? "GET" : "POST";
+    req_path = req.path[0] ? req.path : "/";
+
     /* Allocate a shared page-body buffer on the heap */
     #define PAGE_BUF_SIZE 16384
     char *body = (char *)malloc(PAGE_BUF_SIZE);
@@ -1099,6 +1127,11 @@ static void handle_http_client(int client_fd)
                     "\r\n"
                     "<html><body><h1>401 Unauthorized</h1></body></html>";
                 send(client_fd, resp, strlen(resp), MSG_NOSIGNAL);
+                /* 401 is uncommon enough to always log -- helps users
+                 * debug auth issues without enabling debug verbosity. */
+                ESP_LOGW(TAG, "http  %s %s  401  %lldms",
+                         req_method, req_path,
+                         (esp_timer_get_time() - req_start_us) / 1000);
                 free(body);
                 close(client_fd);
                 return;
@@ -2345,6 +2378,28 @@ static void handle_http_client(int client_fd)
         http_send_body(client_fd, body, len);
     }
 
+    int64_t elapsed_ms = (esp_timer_get_time() - req_start_us) / 1000;
+    /* Access-logging policy:
+     *   - Fast (<25ms):  ESP_LOGD only -- compiled out at the default log
+     *                    verbosity (Info). Each console write adds ~5-10ms
+     *                    of latency to the request itself (USB Serial JTAG
+     *                    pushes synchronously through a small ring buf),
+     *                    so logging every fast request would *inflate* the
+     *                    very metric we're measuring. Enable via menuconfig
+     *                    -> Component log verbosity -> Debug for full
+     *                    per-request tracing during development.
+     *   - Slow (>=25ms): ESP_LOGW. 25ms is just above the fast-path baseline
+     *                    measured on 0.6.5 without the log line in the way;
+     *                    anything slower is worth flagging in the field.
+     * See docs/portal-latency-analysis.md. */
+    if (elapsed_ms >= 25) {
+        ESP_LOGW(TAG, "http  %s %s  done  %lldms  (slow)",
+                 req_method, req_path, elapsed_ms);
+    } else {
+        ESP_LOGD(TAG, "http  %s %s  done  %lldms",
+                 req_method, req_path, elapsed_ms);
+    }
+
     free(body);
     close(client_fd);
 }
@@ -2374,7 +2429,13 @@ static void portal_http_task(void *arg)
         return;
     }
 
-    listen(s_http_fd, 4);
+    /* Backlog 8 (was 4): browsers routinely open 6+ parallel connections
+     * to one origin (the dashboard + /api/clients polling + the WS
+     * endpoint + a second tab can easily get there). With backlog 4 the
+     * 5th and 6th SYNs are dropped by LwIP and the user perceives 1-3s
+     * connection hangs as the browser retries. MQTT broker's listen()
+     * already uses 8 -- now consistent. */
+    listen(s_http_fd, 8);
     ESP_LOGI(TAG, "Portal HTTP listening on port %d", PORTAL_HTTP_PORT);
 
     while (1) {
@@ -2469,8 +2530,28 @@ void portal_start(void)
 {
     portal_load_wifi_state();
 
-    xTaskCreate(portal_http_task, "portal_http", PORTAL_TASK_STACK, NULL, 5, NULL);
-    xTaskCreate(portal_dns_task, "portal_dns", PORTAL_TASK_STACK, NULL, 5, NULL);
+    /* Pin both portal tasks to CPU 0.
+     *
+     * Before: xTaskCreate() => no affinity, FreeRTOS schedules on whichever
+     * core has room. Frequently landed on CPU 1 at equal priority to the
+     * MQTT broker task (also priority 5, pinned to CPU 1), causing 10ms
+     * tick round-robin slices and ~100ms p95 latency tails when the
+     * broker was in a busy iteration (fanout, retained scan, QoS-1
+     * retries).
+     *
+     * After: portal lives on CPU 0 alongside WiFi/LwIP/main/esp_timer --
+     * all of which run at higher priorities (18-23) and pre-empt the
+     * portal cleanly when they need the CPU. The broker keeps CPU 1 to
+     * itself. This is the 'dedicated core' property users intuitively
+     * expected. See docs/portal-latency-analysis.md for the measurements
+     * that motivated this change.
+     *
+     * Per-WS tasks (portal_ws.c) are pinned the same way for the same
+     * reason. */
+    xTaskCreatePinnedToCore(portal_http_task, "portal_http",
+                            PORTAL_TASK_STACK, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(portal_dns_task, "portal_dns",
+                            PORTAL_TASK_STACK, NULL, 5, NULL, 0);
 
     char ap_ip[16] = "";
     wifi_get_ap_ip_str(ap_ip, sizeof(ap_ip));
