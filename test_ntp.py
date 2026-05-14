@@ -113,11 +113,21 @@ def test_api_time_schema():
         "synced": bool, "epoch_us": int, "last_sync_age_s": int,
         "sync_count": int, "upstream": str, "server_running": bool,
         "stratum": int, "served": int, "dropped": dict,
+        # 0.7.2: drift compensation fields.
+        # drift_ppm is None | int  (None until >=2 syncs / >=60s baseline)
+        # free_running_s is int (0 means within normal poll interval)
+        "free_running_s": int,
     }
     for k, t in expected.items():
         assert k in d, f"/api/time missing field {k!r}"
         assert isinstance(d[k], t), \
             f"/api/time {k}={d[k]!r} not {t.__name__}"
+    assert "drift_ppm" in d, "/api/time missing field 'drift_ppm'"
+    assert d["drift_ppm"] is None or isinstance(d["drift_ppm"], int), \
+        f"/api/time drift_ppm={d['drift_ppm']!r} not None|int"
+    if isinstance(d["drift_ppm"], int):
+        assert -500 <= d["drift_ppm"] <= 500, \
+            f"drift_ppm={d['drift_ppm']} outside the clamped ±500 range"
     for k in ("rate", "size", "mode"):
         assert k in d["dropped"], f"/api/time dropped.{k!r} missing"
         assert isinstance(d["dropped"][k], int)
@@ -125,7 +135,8 @@ def test_api_time_schema():
     assert d["synced"] == (d["epoch_us"] > 0), \
         f"synced={d['synced']!r} disagrees with epoch_us={d['epoch_us']!r}"
     print(f"  ✓ /api/time schema valid (synced={d['synced']}, "
-          f"stratum={d['stratum']}, served={d['served']})")
+          f"stratum={d['stratum']}, served={d['served']}, "
+          f"drift_ppm={d['drift_ppm']})")
 
 
 def test_api_time_is_open():
@@ -146,10 +157,15 @@ def test_sys_broker_time_publisher():
     """
     Subscribe to $SYS/broker/# and confirm $SYS/broker/time arrives
     within 20s while the broker is synced. Plan criterion #1.
+    0.7.2: also confirms the new drift_ppm + free_running_s retained
+    topics are flowing.
     """
     import paho.mqtt.client as mqtt
 
-    state = {"got_time": False, "got_synced": False, "got_stratum": False}
+    state = {
+        "got_time": False, "got_synced": False, "got_stratum": False,
+        "got_drift": False, "got_free_running": False,
+    }
 
     def on_connect(c, u, f, rc, p=None):
         c.subscribe("$SYS/broker/#")
@@ -161,6 +177,10 @@ def test_sys_broker_time_publisher():
             state["got_synced"] = msg.payload == b"1"
         elif msg.topic == "$SYS/broker/ntp/stratum":
             state["got_stratum"] = True
+        elif msg.topic == "$SYS/broker/ntp/drift_ppm":
+            state["got_drift"] = True
+        elif msg.topic == "$SYS/broker/ntp/free_running_s":
+            state["got_free_running"] = True
 
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="test_ntp_sys")
     c.on_connect = on_connect
@@ -168,7 +188,9 @@ def test_sys_broker_time_publisher():
     c.connect(HOST, 1883)
     c.loop_start()
     deadline = time.time() + 22
-    while time.time() < deadline and not state["got_time"]:
+    while time.time() < deadline and not (
+            state["got_time"] and state["got_drift"]
+            and state["got_free_running"]):
         time.sleep(0.5)
     c.loop_stop()
 
@@ -178,7 +200,12 @@ def test_sys_broker_time_publisher():
         "received $SYS/broker/ntp/synced != '1' (broker reports unsynced)"
     assert state["got_stratum"], \
         "did NOT receive $SYS/broker/ntp/stratum within 22s"
-    print(f"  ✓ $SYS/broker/{{time,ntp/synced,ntp/stratum}} all flowing")
+    assert state["got_drift"], \
+        "did NOT receive $SYS/broker/ntp/drift_ppm within 22s"
+    assert state["got_free_running"], \
+        "did NOT receive $SYS/broker/ntp/free_running_s within 22s"
+    print("  ✓ $SYS/broker/{time,ntp/synced,ntp/stratum,"
+          "ntp/drift_ppm,ntp/free_running_s} all flowing")
 
 
 # ---- Acceptance criterion #2: SNTP server replies correctly --------------
