@@ -64,10 +64,30 @@ build:
 ota:
 	@if [ ! -f $(BIN) ]; then echo "Run 'make build' first ($(BIN) missing)"; exit 1; fi
 	@echo "OTAing $(BIN) -> $(OTA_URL)"
-	@if [ -n "$(PORTAL_AUTH)" ]; then \
-	  curl -s -m 120 -u '$(PORTAL_AUTH)' -F "firmware=@$(BIN)" $(OTA_URL); \
+	@# Two-step from 0.7.1 onward: fetch the CSRF token (auth-gated),
+	@# then upload the firmware with the token in the URL.
+	@# Backward-compatible against 0.7.0 and earlier: those builds
+	@# don't have /api/csrf, so the first curl errors out silently --
+	@# the upload still works because pre-0.7.1 didn't require a token.
+	@TOKEN=$$(if [ -n "$(PORTAL_AUTH)" ]; then \
+	    curl -s -m 5 -u '$(PORTAL_AUTH)' $(PORTAL_URL)/api/csrf 2>/dev/null \
+	      | sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p'; \
+	  else \
+	    curl -s -m 5 $(PORTAL_URL)/api/csrf 2>/dev/null \
+	      | sed -n 's/.*"token":"\([0-9a-f]*\)".*/\1/p'; \
+	  fi); \
+	if [ -n "$$TOKEN" ]; then \
+	  PREFIX=$$(echo "$$TOKEN" | cut -c1-8); \
+	  echo "  csrf token: $$PREFIX..."; \
+	  URL="$(OTA_URL)?csrf=$$TOKEN"; \
 	else \
-	  curl -s -m 120 -F "firmware=@$(BIN)" $(OTA_URL); \
+	  echo "  csrf token: <none> (pre-0.7.1 device, no token required)"; \
+	  URL="$(OTA_URL)"; \
+	fi; \
+	if [ -n "$(PORTAL_AUTH)" ]; then \
+	  curl -s -m 120 -u '$(PORTAL_AUTH)' -F "firmware=@$(BIN)" "$$URL"; \
+	else \
+	  curl -s -m 120 -F "firmware=@$(BIN)" "$$URL"; \
 	fi
 	@echo ""
 

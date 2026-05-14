@@ -1273,13 +1273,17 @@ def test_firmware_version():
             else:
                 fail(f"  firmware.{field} missing or empty")
 
-        # Version should look like semver (x.y.z)
+        # Version should look like semver: x.y.z OR x.y.z-prerelease
+        # (e.g. "0.7.0", "0.7.1-rc1"). We split off the pre-release
+        # suffix at the first hyphen and only require the numeric core
+        # to be three digit-only fields.
         ver = fw.get("version", "")
-        parts = ver.split(".")
+        core = ver.split("-", 1)[0]
+        parts = core.split(".")
         if len(parts) == 3 and all(p.isdigit() for p in parts):
             ok(f"  Version '{ver}' is valid semver")
         else:
-            fail(f"  Version '{ver}' is not valid semver (expected x.y.z)")
+            fail(f"  Version '{ver}' is not valid semver (expected x.y.z[-prerelease])")
 
         # Name should be non-empty
         if fw.get("name"):
@@ -1559,6 +1563,140 @@ def test_version_display():
 #  MAIN
 # ══════════════════════════════════════════════════════════════
 
+# ============================================================
+#  22. CSRF (added 0.7.1)
+# ============================================================
+
+def test_csrf():
+    """CSRF protection: state-changing endpoints reject requests that
+    lack a valid token; /api/csrf returns one; cookie is set on every
+    response."""
+    section("22. CSRF Protection")
+
+    if requests is None:
+        skip("'requests' module not installed")
+        return
+
+    # 1. /api/csrf returns a hex token
+    try:
+        resp = requests.get(f"{HTTP_BASE}/api/csrf", timeout=5)
+        if resp.status_code != 200:
+            fail(f"/api/csrf returned {resp.status_code}")
+            return
+        data = resp.json()
+        token = data.get("token", "")
+        if (len(token) == 32 and
+                all(c in "0123456789abcdef" for c in token)):
+            ok(f"/api/csrf returned 32-hex token ({token[:8]}...)")
+        else:
+            fail(f"/api/csrf token shape wrong: {token!r}")
+            return
+    except Exception as e:
+        fail(f"/api/csrf failed: {e}")
+        return
+
+    # 2. Set-Cookie: csrf=... on every response
+    try:
+        resp = requests.get(f"{HTTP_BASE}/", timeout=5)
+        sc = resp.headers.get("Set-Cookie", "")
+        if "csrf=" in sc and "SameSite=Strict" in sc and "Path=/" in sc:
+            ok("Set-Cookie: csrf=... SameSite=Strict Path=/")
+        else:
+            fail(f"Set-Cookie header missing or malformed: {sc!r}")
+    except Exception as e:
+        fail(f"Set-Cookie probe failed: {e}")
+
+    # 3. POST /api/time/resync without token -> 403
+    try:
+        resp = requests.post(f"{HTTP_BASE}/api/time/resync", timeout=5)
+        if resp.status_code == 403:
+            ok("POST without token -> 403")
+        else:
+            fail(f"POST without token returned {resp.status_code} (want 403)")
+    except Exception as e:
+        fail(f"unauth POST probe failed: {e}")
+
+    # 4. POST with WRONG token -> 403
+    try:
+        bad = "0" * 32
+        resp = requests.post(f"{HTTP_BASE}/api/time/resync",
+                             headers={"X-CSRF-Token": bad}, timeout=5)
+        if resp.status_code == 403:
+            ok("POST with wrong token -> 403")
+        else:
+            fail(f"POST with wrong token returned {resp.status_code} (want 403)")
+    except Exception as e:
+        fail(f"bad-token probe failed: {e}")
+
+    # 5. POST with token via X-CSRF-Token header -> 200
+    try:
+        resp = requests.post(f"{HTTP_BASE}/api/time/resync",
+                             headers={"X-CSRF-Token": token}, timeout=5)
+        if resp.status_code == 200:
+            ok("POST with header token -> 200")
+        else:
+            fail(f"POST with header token returned {resp.status_code} (want 200)")
+    except Exception as e:
+        fail(f"header-path probe failed: {e}")
+
+    # 6. POST with token via form field -> 200
+    try:
+        resp = requests.post(f"{HTTP_BASE}/api/time/resync",
+                             data={"csrf": token}, timeout=5)
+        if resp.status_code == 200:
+            ok("POST with form-field token -> 200")
+        else:
+            fail(f"POST with form-field token returned {resp.status_code} (want 200)")
+    except Exception as e:
+        fail(f"form-path probe failed: {e}")
+
+    # 7. GET /reboot -> 404 (promoted to POST in 0.7.1)
+    try:
+        resp = requests.get(f"{HTTP_BASE}/reboot", timeout=5)
+        if resp.status_code == 404:
+            ok("GET /reboot -> 404 (promoted to POST in 0.7.1)")
+        else:
+            fail(f"GET /reboot returned {resp.status_code} (want 404)")
+    except Exception as e:
+        fail(f"GET /reboot probe failed: {e}")
+
+    # 8. POST /reboot without token -> 403 (device NOT rebooted)
+    try:
+        resp = requests.post(f"{HTTP_BASE}/reboot", timeout=5)
+        if resp.status_code == 403:
+            ok("POST /reboot without token -> 403 (NOT rebooted)")
+        else:
+            fail(f"POST /reboot without token returned {resp.status_code} (want 403)")
+    except Exception as e:
+        fail(f"reboot probe failed: {e}")
+
+    # 9. /api/csrf is auth-gated when auth is on. We bypass our own
+    #    monkey-patched session by importing requests fresh.
+    import os
+    cfg_auth = os.environ.get("BROKER_AUTH", "")
+    if cfg_auth:
+        try:
+            import importlib, sys
+            r = importlib.import_module("requests")
+            # Use the unpatched .get directly with a raw URL -- our
+            # monkey-patch wraps requests.get/post at module load,
+            # but a fresh urllib request bypasses it.
+            import urllib.request as ur
+            try:
+                ur.urlopen(f"{HTTP_BASE}/api/csrf", timeout=5)
+                fail("/api/csrf without auth returned 200 (want 401)")
+            except ur.HTTPError as he:
+                if he.code == 401:
+                    ok("/api/csrf without auth -> 401")
+                else:
+                    fail(f"/api/csrf without auth returned {he.code} (want 401)")
+        except Exception as e:
+            fail(f"auth-gating probe failed: {e}")
+    else:
+        skip("/api/csrf auth-gating (no BROKER_AUTH set)")
+
+
+
 def main():
     print(f"\n{'═'*60}")
     print(f"  ESP32 MQTT Broker Test Suite")
@@ -1602,6 +1740,7 @@ def main():
     test_firmware_update_page()
     test_connected_clients()
     test_version_display()
+    test_csrf()
 
     elapsed = time.monotonic() - t0
 
