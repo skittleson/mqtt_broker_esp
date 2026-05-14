@@ -9,6 +9,7 @@
 #include "wifi_connect.h"
 #include "portal.h"
 #include "ntp.h"
+#include "csrf.h"
 #include "led_strip.h"
 #include "mdns.h"
 
@@ -279,6 +280,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting SNTP client + server...");
     ntp_init();
     ntp_server_start();
+
+    /* CSRF: random 16-byte per-boot token used by every state-changing
+     * portal endpoint. Must initialise before the portal task starts
+     * accepting requests; portal_init was already called above so we're
+     * inside the window between portal start and the first request. Safe
+     * here because the HTTP listener won't see traffic until the network
+     * is up, which happens after this call returns. */
+    csrf_init();
 
     ESP_LOGI(TAG, "=== ESP32 MQTT Broker ready ===");
 }

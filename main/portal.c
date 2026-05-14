@@ -19,6 +19,7 @@
 #include "wifi_connect.h"
 #include "ntp.h"
 #include "version.h"
+#include "csrf.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -236,6 +237,11 @@ typedef struct {
     char body[512];
     char auth_user[65];   /* decoded from Authorization: Basic header */
     char auth_pass[65];
+    /* CSRF token value from the X-CSRF-Token request header. Empty
+     * string when absent. Form-submitted tokens (hidden input fields)
+     * are NOT copied here -- those are extracted lazily from `body`
+     * at validation time via csrf_verify(). */
+    char csrf_header[CSRF_TOKEN_BUF_SIZE];
 } http_request_t;
 
 /* Minimal base64 decode for Basic auth */
@@ -313,6 +319,27 @@ static void http_parse(const uint8_t *data, size_t len, http_request_t *req)
         req->body[body_len] = '\0';
     }
 
+    /* Extract X-CSRF-Token header (case-insensitive). Tolerates either
+     * canonical capitalization or the lowercase form some HTTP libs
+     * emit. Value capped at CSRF_TOKEN_HEX_LEN; anything longer is
+     * truncated and will fail constant-time compare downstream. */
+    {
+        char *csrf = strstr(space + 1, "X-CSRF-Token: ");
+        if (!csrf) csrf = strstr(space + 1, "x-csrf-token: ");
+        if (csrf) {
+            csrf += 14;  /* skip "X-CSRF-Token: " */
+            char *end = strstr(csrf, "\r\n");
+            if (end) {
+                size_t n = (size_t)(end - csrf);
+                if (n >= sizeof(req->csrf_header)) {
+                    n = sizeof(req->csrf_header) - 1;
+                }
+                memcpy(req->csrf_header, csrf, n);
+                req->csrf_header[n] = '\0';
+            }
+        }
+    }
+
     /* Extract Authorization: Basic header */
     char *auth = strstr(space + 1, "Authorization: Basic ");
     if (!auth) auth = strstr(space + 1, "authorization: Basic ");
@@ -376,15 +403,35 @@ static const char *urldecode_param(const char *body, const char *key, char *out,
 
 static int http_response_start(int fd, const char *status, const char *content_type, size_t body_len)
 {
-    char header[256];
+    /* Always re-emit the CSRF cookie on every response. The token is
+     * constant per boot, so this is idempotent for the browser. ~70 B
+     * overhead per response, dwarfed by the response body itself.
+     *
+     * Cookie attributes:
+     *   Path=/             -- scope to the whole site (every endpoint)
+     *   SameSite=Strict    -- block cross-site cookie sends; primary
+     *                         CSRF defense even before the token check
+     *   (NOT HttpOnly)     -- client JS must read it for the
+     *                         X-CSRF-Token header in fetch() calls.
+     *                         Acceptable here: every dynamic value
+     *                         injected into HTML goes through textContent
+     *                         on the client and through HTML-encoding
+     *                         server-side, so XSS surface is effectively
+     *                         zero. Token disclosure to a same-origin
+     *                         attacker is moot -- they'd already be in.
+     *   (NOT Secure)       -- portal is HTTP-only; setting Secure would
+     *                         silently drop the cookie. */
+    char header[384];
     int len = snprintf(header, sizeof(header),
         "HTTP/1.1 %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %lu\r\n"
         "Connection: close\r\n"
         "Cache-Control: no-cache\r\n"
+        "Set-Cookie: csrf=%s; Path=/; SameSite=Strict\r\n"
         "\r\n",
-        status, content_type, (unsigned long)body_len);
+        status, content_type, (unsigned long)body_len,
+        csrf_token_hex());
 
     ssize_t sent = 0;
     while ((size_t)sent < (size_t)len) {
@@ -622,6 +669,30 @@ static void http_send_plain(int fd, const char *status, const char *msg)
     http_send_body(fd, msg, len);
 }
 
+/* Sends a 403 with a short HTML body explaining the CSRF rejection.
+ * Used as the single failure response for every state-changing
+ * endpoint. The body is intentionally short and stable so test
+ * harnesses can assert on it.
+ *
+ * 403 (not 401) is correct here: 401 means "you need credentials"
+ * which would re-trigger the browser's basic-auth dialog. The user has
+ * already authenticated; what's missing is the CSRF token. 403
+ * 'Forbidden' is the right semantic and avoids the auth-dialog loop. */
+static void http_send_csrf_403(int fd)
+{
+    const char *msg =
+        "<html><body><h1>403 Forbidden</h1>"
+        "<p>Missing or invalid CSRF token.</p>"
+        "<p>If you reached this page from a bookmark or a form"
+        " submitted before the device rebooted, reload the page"
+        " once to refresh your CSRF token, then retry.</p>"
+        "<p><a href='/'>Back to dashboard</a></p>"
+        "</body></html>";
+    size_t len = strlen(msg);
+    http_response_start(fd, "403 Forbidden", "text/html; charset=utf-8", len);
+    http_send_body(fd, msg, len);
+}
+
 /*
  * Handle multipart/form-data OTA upload.
  * Called when we detect POST /ota-upload in the initial header recv.
@@ -631,6 +702,63 @@ static void http_send_plain(int fd, const char *status, const char *msg)
 static void handle_ota_upload(int client_fd, char *header_buf, int header_len)
 {
     ESP_LOGI(TAG, "OTA upload starting");
+
+    /* CSRF check up front, before we commit to reading megabytes of
+     * body bytes. Multipart uploads carry the token via either:
+     *   - URL query string  /ota-upload?csrf=<hex>      (browser <form>)
+     *   - X-CSRF-Token: <hex> request header           (XHR + curl)
+     * Hidden-input <form> fields land late in the multipart stream
+     * (browser serializes inputs in DOM order, with the file last),
+     * so we'd have to buffer the entire upload before deciding to
+     * accept it -- avoidable by carrying the token in the URL. */
+    {
+        char csrf_val[CSRF_TOKEN_BUF_SIZE] = "";
+
+        /* Extract X-CSRF-Token header. */
+        char *h = strstr(header_buf, "X-CSRF-Token: ");
+        if (!h) h = strstr(header_buf, "x-csrf-token: ");
+        if (h) {
+            h += 14;  /* skip "X-CSRF-Token: " */
+            char *end = strstr(h, "\r\n");
+            if (end) {
+                size_t n = (size_t)(end - h);
+                if (n >= sizeof(csrf_val)) n = sizeof(csrf_val) - 1;
+                memcpy(csrf_val, h, n);
+                csrf_val[n] = '\0';
+            }
+        }
+
+        /* Fall back to the URL query string `?csrf=<hex>` or
+         * `&csrf=<hex>`. The first line of header_buf is the request
+         * line ("POST /ota-upload?csrf=ABC... HTTP/1.1\r\n"); we scan
+         * up to the first \r\n only to avoid matching headers below. */
+        if (csrf_val[0] == '\0') {
+            char *req_line_end = strstr(header_buf, "\r\n");
+            if (req_line_end) {
+                *req_line_end = '\0';  /* temporary terminator */
+                char *q = strstr(header_buf, "csrf=");
+                if (q && (q == header_buf ||
+                          *(q - 1) == '?' || *(q - 1) == '&')) {
+                    q += 5;
+                    /* stop at '&', ' ' (before HTTP/1.1), or end */
+                    size_t n = 0;
+                    while (q[n] && q[n] != '&' && q[n] != ' ' &&
+                           n < sizeof(csrf_val) - 1) {
+                        csrf_val[n] = q[n];
+                        n++;
+                    }
+                    csrf_val[n] = '\0';
+                }
+                *req_line_end = '\r';  /* restore so downstream parsers see it */
+            }
+        }
+
+        if (!csrf_verify(csrf_val, NULL)) {
+            ESP_LOGW(TAG, "OTA upload rejected: missing or invalid CSRF token");
+            http_send_csrf_403(client_fd);
+            return;
+        }
+    }
 
     /* Find Content-Length */
     char *cl_hdr = strstr(header_buf, "Content-Length: ");
@@ -1322,8 +1450,18 @@ static void handle_http_client(int client_fd)
             "<a href='/time' class='btn'>Time / NTP</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
-            "<a href='/reboot' class='btn bred' "
-            "onclick=\"return confirm('Restart?')\">Restart</a>");
+            /* Reboot is state-changing; promote from GET to POST so it
+             * can't fire from a stray <img> tag on an attacker's page.
+             * Styled to look identical to the old anchor. CSRF token
+             * rides as a hidden form field; submit goes through
+             * confirm() like before. */
+            "<form method='POST' action='/reboot'"
+            " style='display:inline;margin:0;padding:0' "
+            "onsubmit=\"return confirm('Restart?')\">"
+            "<input type='hidden' name='csrf' value='%s'>"
+            "<button type='submit' class='btn bred'>Restart</button>"
+            "</form>",
+            csrf_token_hex());
 
         http_send_page(client_fd, body, (size_t)pos);
 
@@ -1528,12 +1666,15 @@ static void handle_http_client(int client_fd)
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Device&nbsp;</legend>"
             "<form method='POST' action='/save-settings'>"
+            /* CSRF token: hidden input, validated by csrf_verify() in
+             * the /save-settings POST handler. */
+            "<input type='hidden' name='csrf' value='%s'>"
             "<label>Hostname (requires reboot)</label>"
             "<input type='text' name='hostname' value='%s' "
             "pattern='[A-Za-z0-9_\\-]{1,32}' maxlength='32' required "
             "title='1-32 chars: letters, digits, hyphen, underscore'>"
             "</fieldset>",
-            hostname);
+            csrf_token_hex(), hostname);
 
         /* MQTT settings.
          * Auth password input is rendered empty -- the /save-settings handler
@@ -1721,6 +1862,10 @@ static void handle_http_client(int client_fd)
      * buffer size, retained-message toggle, AP password all needed one).
      * Unified to "always reboot" matches user expectation. */
     } else if (strcmp(req.path, "/save-settings") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
         char val[65];
 
         if (urldecode_param(req.body, "hostname", val, sizeof(val))) {
@@ -1888,6 +2033,7 @@ static void handle_http_client(int client_fd)
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;WiFi Configuration&nbsp;</legend>"
             "<form method='POST' action='/save'>"
+            "<input type='hidden' name='csrf' value='%s'>"
             "<label>WiFi SSID</label>"
             "<input type='text' name='ssid' placeholder='Network name' required maxlength='32' autofocus>"
             "<label>WiFi Password</label>"
@@ -1906,12 +2052,17 @@ static void handle_http_client(int client_fd)
             "Save &amp; Reboot</button>"
             "</form></fieldset>"
             "<br><a href='/' class='btn'>Main Menu</a>",
+            csrf_token_hex(),
             s_portal_ap_mode ? "checked" : "");
 
         http_send_page(client_fd, body, (size_t)pos);
 
     /* ============ SAVE WIFI ============ */
     } else if (strcmp(req.path, "/save") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
         char ssid[33] = "", password[65] = "";
         int ap_mode = 0;
         urldecode_param(req.body, "ssid", ssid, sizeof(ssid));
@@ -1986,8 +2137,18 @@ static void handle_http_client(int client_fd)
             "/");
         /* Fall through to normal cleanup -- no esp_restart here. */
 
-    /* ============ REBOOT ============ */
-    } else if (strcmp(req.path, "/reboot") == 0) {
+    /* ============ REBOOT ============
+     * Promoted from GET to POST in the CSRF pass so it can't be
+     * triggered by an attacker's <img src> tag. Dashboard "Restart"
+     * button now wraps the action in a <form method=POST> with the
+     * hidden CSRF token. */
+    } else if (strcmp(req.path, "/reboot") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body);
+            close(client_fd);
+            return;
+        }
         /* Reboot countdown page (shared helper). Polls /api/status every 1s
          * and replaces itself with a green 'Back online' link as soon as the
          * device returns. Previously this dumped the user on a broken page
@@ -2258,18 +2419,26 @@ static void handle_http_client(int client_fd)
                 "stays in flash so you can switch back the same way.</p>"
                 "<form method='POST' action='/ota-rollback' "
                 "onsubmit=\"return confirm('Roll back to ' + '%s' + ' and reboot?')\">"
+                "<input type='hidden' name='csrf' value='%s'>"
                 "<button type='submit' class='btn bgry'>Roll back &amp; Reboot</button>"
                 "</form></fieldset>",
                 other->label,
                 other_desc.project_name[0] ? other_desc.project_name : FW_NAME,
                 other_desc.version,
-                other_desc.version);
+                other_desc.version,
+                csrf_token_hex());
         }
 
         /* File upload form */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            /* The CSRF token rides in the form `action` URL as a query
+             * parameter. Multipart bodies put hidden inputs AFTER files
+             * in many browser implementations, which would force us to
+             * buffer the entire upload before validating -- much simpler
+             * to authenticate via the URL. Same token, same security
+             * model. */
             "<fieldset><legend>&nbsp;Upload Firmware&nbsp;</legend>"
-            "<form method='POST' action='/ota-upload' enctype='multipart/form-data' "
+            "<form method='POST' action='/ota-upload?csrf=%s' enctype='multipart/form-data' "
             "id='fwform'>"
             "<label>Select firmware .bin file</label>"
             "<input type='file' name='firmware' accept='.bin' required "
@@ -2313,11 +2482,13 @@ static void handle_http_client(int client_fd)
             "\"<div class='st warn'>Connection error</div>\";"
             "document.getElementById('fwbtn').disabled=false;};"
             "var fd=new FormData();fd.append('firmware',f);"
-            "x.open('POST','/ota-upload');"
+            "x.open('POST','/ota-upload?csrf=%s');"
             "x.send(fd);"
             "};"
             "</script>"
-            "</fieldset>");
+            "</fieldset>",
+            csrf_token_hex(),    /* %s in form action */
+            csrf_token_hex());   /* %s in x.open() URL  */
 
         /* URL-based OTA.
          *
@@ -2329,11 +2500,13 @@ static void handle_http_client(int client_fd)
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;OTA Update via URL&nbsp;</legend>"
             "<form method='POST' action='/ota-url' id='urlform'>"
+            "<input type='hidden' name='csrf' value='%s'>"
             "<label>Firmware URL (http:// or https://)</label>"
             "<input type='url' name='url' placeholder='http://192.168.1.100:8080/firmware.bin' "
             "required pattern='https?://.*'>"
             "<br><button type='submit' class='bgrn'>Download &amp; Flash</button>"
-            "</form></fieldset>");
+            "</form></fieldset>",
+            csrf_token_hex());
 
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<br><a href='/' class='btn'>Main Menu</a>");
@@ -2353,6 +2526,24 @@ static void handle_http_client(int client_fd)
         int len = snprintf(json, PAGE_BUF_SIZE,
             "{\"uptime_s\":%lld}",
             (long long)(stats.uptime_ms / 1000));
+        http_response_start(client_fd, "200 OK", "application/json", len);
+        http_send_body(client_fd, json, len);
+
+    /* ============ CSRF TOKEN (auth-gated) ============
+     * CLI helper. Browsers see the same token on every page in their
+     * `csrf` cookie and don't need this endpoint -- but `curl` and
+     * `make ota` do, because cookies aren't preserved between separate
+     * invocations without --cookie-jar.
+     *
+     * Returns the active token as JSON; the response also re-emits the
+     * `Set-Cookie: csrf=...` header via http_response_start, so a
+     * cookie-jar-using client gets it twice. Auth-gated (Basic Auth
+     * already enforced upstream) so an attacker can't lift the token
+     * with one request. */
+    } else if (strcmp(req.path, "/api/csrf") == 0 && req.method == REQ_GET) {
+        char *json = body;
+        int len = snprintf(json, PAGE_BUF_SIZE,
+            "{\"token\":\"%s\"}", csrf_token_hex());
         http_response_start(client_fd, "200 OK", "application/json", len);
         http_send_body(client_fd, json, len);
 
@@ -2407,6 +2598,10 @@ static void handle_http_client(int client_fd)
      * landed yet). Per the plan this is auth-gated; the regular Basic
      * Auth check above already enforces that. */
     } else if (strcmp(req.path, "/api/time/resync") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
         bool ok = ntp_force_resync();
         char *json = body;
         int len = snprintf(json, PAGE_BUF_SIZE,
@@ -2493,12 +2688,19 @@ static void handle_http_client(int client_fd)
          * leaves the user on the JSON output but still triggers the action. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<form id='rsf' method='POST' action='/api/time/resync' style='margin:8px 0'>"
+            "<input type='hidden' name='csrf' value='%s'>"
             "<button type='submit' class='btn'>Force resync</button>"
             "</form>"
+            /* fetch() path uses X-CSRF-Token header; <noscript> users
+             * get the <form> path with the hidden field above. Same
+             * token, two carriers. */
             "<script>document.getElementById('rsf').onsubmit=function(e){"
-            "e.preventDefault();fetch('/api/time/resync',{method:'POST'})"
+            "e.preventDefault();"
+            "fetch('/api/time/resync',"
+            "{method:'POST',headers:{'X-CSRF-Token':'%s'}})"
             ".then(function(){setTimeout(function(){location.href='/time';},800);});"
-            "return false;};</script>");
+            "return false;};</script>",
+            csrf_token_hex(), csrf_token_hex());
 
         /* Recent-clients table from the server's rate-limit LRU. Sorted
          * by last_us descending in-place (simple insertion sort -- max 32
@@ -2623,6 +2825,10 @@ static void handle_http_client(int client_fd)
      * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE. Idempotent: pressing twice
      * just bounces the user between slots. */
     } else if (strcmp(req.path, "/ota-rollback") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
         const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
         esp_app_desc_t other_desc;
         if (!other || esp_ota_get_partition_description(other, &other_desc) != ESP_OK) {
@@ -2668,6 +2874,10 @@ static void handle_http_client(int client_fd)
 
     /* ============ OTA VIA URL ============ */
     } else if (strcmp(req.path, "/ota-url") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
         char url[256] = "";
         urldecode_param(req.body, "url", url, sizeof(url));
 
