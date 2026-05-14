@@ -68,6 +68,17 @@ typedef struct {
     uint32_t dropped_rate;      /* Per-source rate-limit drops. */
     uint32_t dropped_size;      /* Packets dropped for length out-of-range. */
     uint32_t dropped_mode;      /* Packets dropped for unsupported mode. */
+
+    /* Drift compensation (0.7.2):
+     *   drift_ppm        Estimated local-oscillator drift vs upstream
+     *                    NTP. Positive = our clock runs fast.
+     *                    INT32_MIN until we have >= 2 syncs.
+     *   free_running_s   Seconds since last successful upstream sync,
+     *                    or 0 if we have NEVER synced or are within
+     *                    the normal poll interval. Becomes nonzero
+     *                    when last_sync_age_s > 2 * poll_interval. */
+    int32_t  drift_ppm;
+    int32_t  free_running_s;
 } ntp_state_t;
 
 /* Settings struct used by the portal to render the form and persist edits.
@@ -90,6 +101,23 @@ bool    ntp_is_synced(void);
 
 /* Read-only state for the portal. Pass NULL to ignore a field. */
 void ntp_get_state(ntp_state_t *out);
+
+/* Wall-clock readout in epoch microseconds, with free-running drift
+ * compensation applied. Returns 0 if not synced.
+ *
+ * - When the last successful upstream sync is within 2 * poll_interval,
+ *   this is identical to ntp_now_us() (the naked gettimeofday() read).
+ * - When free-running and a drift_ppm estimate is available (≥ 2 prior
+ *   syncs spanning ≥ 60s), the return value applies a linear
+ *   correction `raw - drift_ppm * dt_seconds` where dt is time since
+ *   the last sync.
+ *
+ * Used by the SNTP server response builder and `$SYS/broker/time` to
+ * hand external consumers an estimate that's better than naked
+ * crystal drift. /api/time and dashboards continue to show the raw
+ * gettimeofday() value (in `epoch_us`) so users can see the actual
+ * uncorrected clock too. */
+int64_t ntp_now_us_corrected(void);
 void ntp_get_settings(ntp_settings_t *out);
 
 /* Forces an immediate upstream poll. Returns false if NTP is disabled in

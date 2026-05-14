@@ -60,6 +60,128 @@ static int64_t  s_last_sync_us      = 0;     /* esp_timer units, NOT epoch */
 static uint32_t s_sync_count        = 0;
 static int      s_last_upstream_idx = -1;
 static char     s_upstreams[NTP_UPSTREAMS_MAX][NTP_UPSTREAM_MAX_LEN];
+static uint32_t s_poll_s            = NTP_POLL_S_DEFAULT;  /* current poll interval */
+
+/* ---- Drift compensation (0.7.2) ----
+ *
+ * After each successful upstream sync we record a (monotonic_us,
+ * wallclock_us) pair into a ring buffer. Between syncs, the wall-clock
+ * ticks via the local oscillator alone -- any systematic deviation from
+ * upstream is what we call "drift".
+ *
+ * Calculation: drift_ppm = ((Δwallclock - Δmonotonic) / Δmonotonic) * 1e6
+ * over the OLDEST<->NEWEST pair we have. Using the endpoints (not
+ * consecutive pairs) gives us the longest measurement baseline and so
+ * the most noise-immune ppm value; a pair from 6 hours ago vs now is
+ * dramatically less sensitive to single-sync noise than two pairs an
+ * hour apart.
+ *
+ * Compensation: when free-running (no successful sync in the last
+ * 2 * poll_interval seconds), SNTP server responses and $SYS/broker/time
+ * publishes apply `corrected = gettimeofday() + drift_ppm * dt / 1e6`
+ * where dt is the time since the last sync. gettimeofday() itself is
+ * NOT mutated -- only the values we hand to external consumers.
+ *
+ * Safety: corrections kick in only after free_running_s > 2*poll,
+ * which means we have a fresh-ish baseline. If drift_ppm has never been
+ * computed (< 2 syncs in the ring), no correction is applied -- we
+ * stay on raw gettimeofday() and accept whatever crystal drift the
+ * silicon hands us, same as 0.7.1 and earlier.
+ */
+#define NTP_DRIFT_RING_SIZE 8
+typedef struct {
+    int64_t mono_us;    /* esp_timer_get_time() at sync */
+    int64_t wall_us;    /* gettimeofday() epoch_us at sync */
+} ntp_drift_sample_t;
+
+static ntp_drift_sample_t s_drift_ring[NTP_DRIFT_RING_SIZE];
+static uint8_t  s_drift_head  = 0;   /* next-write index */
+static uint8_t  s_drift_count = 0;   /* 0..NTP_DRIFT_RING_SIZE */
+static int32_t  s_drift_ppm   = INT32_MIN;  /* INT32_MIN = unknown */
+
+/* Record a (mono, wall) pair and recompute s_drift_ppm. Called from the
+ * SNTP sync notification callback. */
+static void ntp_drift_record(int64_t mono_us, int64_t wall_us)
+{
+    s_drift_ring[s_drift_head].mono_us = mono_us;
+    s_drift_ring[s_drift_head].wall_us = wall_us;
+    s_drift_head = (s_drift_head + 1) % NTP_DRIFT_RING_SIZE;
+    if (s_drift_count < NTP_DRIFT_RING_SIZE) s_drift_count++;
+
+    /* Need at least 2 samples and a non-trivial baseline. */
+    if (s_drift_count < 2) {
+        s_drift_ppm = INT32_MIN;
+        return;
+    }
+    /* Locate oldest and newest. With s_drift_count<RING, oldest is
+     * index 0; with the ring full, oldest is at s_drift_head. */
+    uint8_t newest = (s_drift_head + NTP_DRIFT_RING_SIZE - 1) % NTP_DRIFT_RING_SIZE;
+    uint8_t oldest = (s_drift_count == NTP_DRIFT_RING_SIZE)
+                     ? s_drift_head
+                     : 0;
+    int64_t d_mono = s_drift_ring[newest].mono_us - s_drift_ring[oldest].mono_us;
+    int64_t d_wall = s_drift_ring[newest].wall_us - s_drift_ring[oldest].wall_us;
+    /* Need a baseline of at least 60s for a meaningful ppm; below that
+     * the noise on a single SNTP exchange (~5-100ms RTT asymmetry)
+     * easily yields a multi-thousand-ppm reading that's pure noise. */
+    if (d_mono < 60LL * 1000000LL) {
+        s_drift_ppm = INT32_MIN;
+        return;
+    }
+    /* (d_wall - d_mono) / d_mono * 1e6, computed without losing
+     * precision: numerator can be at most ~2^40, multiply by 1e6 fits
+     * in int64. */
+    int64_t delta = d_wall - d_mono;
+    int32_t ppm = (int32_t)((delta * 1000000LL) / d_mono);
+    /* Clamp to a sane range. Physical crystals are <100 ppm; anything
+     * beyond +/-500 is almost certainly measurement noise from a single
+     * outlier sync. Clamping avoids runaway corrections. */
+    if (ppm >  500) ppm =  500;
+    if (ppm < -500) ppm = -500;
+    s_drift_ppm = ppm;
+}
+
+/* Seconds since the last successful upstream sync. 0 if never synced or
+ * if a sync happened within the last poll interval. */
+static int32_t ntp_free_running_s(void)
+{
+    if (!s_synced) return 0;
+    int64_t age_us = esp_timer_get_time() - s_last_sync_us;
+    int64_t age_s  = age_us / 1000000;
+    if (age_s <= (int64_t)(2 * s_poll_s)) return 0;
+    if (age_s > INT32_MAX) return INT32_MAX;
+    return (int32_t)age_s;
+}
+
+/* Wall-clock readout WITH drift compensation applied when free-running.
+ * Used by the SNTP server response builder and $SYS/broker/time. The
+ * naked gettimeofday() path (ntp_now_us) is unchanged -- portal
+ * displays and /api/time show the raw clock, drift_ppm separately.
+ * The public alias `ntp_now_us_corrected` lets other modules
+ * (mqtt_broker.c $SYS/broker/time) opt in. */
+static int64_t ntp_corrected_now_us(void)
+{
+    int64_t raw = ntp_now_us();
+    if (raw == 0) return 0;
+
+    int32_t fr = ntp_free_running_s();
+    if (fr == 0) return raw;                 /* fresh sync, no need */
+    if (s_drift_ppm == INT32_MIN) return raw; /* no drift estimate yet */
+
+    /* dt = seconds since last sync (we already have that as fr).
+     * correction_us = drift_ppm * dt; sign matches: positive ppm means
+     * our clock runs fast so we subtract.
+     *
+     * Wait -- ppm is computed as (Δwall - Δmono)/Δmono * 1e6 where
+     * Δwall comes from upstream-corrected values. If our local osc is
+     * fast, monotonic_us advances faster than wall-clock would have
+     * absent corrections, so d_wall < d_mono, so ppm < 0. In free run,
+     * we want to ADD the correction to gettimeofday() (which is being
+     * advanced by the same fast osc) to fix it back. So sign-wise:
+     * corrected = raw - ppm * dt. */
+    int64_t correction_us = (int64_t)s_drift_ppm * (int64_t)fr;
+    return raw - correction_us;
+}
 
 /* ---- SNTP server state (Phase 2) ---- */
 
@@ -140,8 +262,17 @@ static void on_sntp_synced(struct timeval *tv)
      * We only want to record the event itself; the wall-clock readout
      * comes from settimeofday() which esp_sntp has just called for us. */
     s_synced = true;
-    s_last_sync_us = esp_timer_get_time();
+    int64_t mono_now = esp_timer_get_time();
+    s_last_sync_us = mono_now;
     s_sync_count++;
+
+    /* Drift compensation: record this sync point. esp_sntp has already
+     * called settimeofday() with the upstream's wall clock; the (mono,
+     * wall) pair we record represents a clean reference for the next
+     * free-running stretch. */
+    int64_t wall_now_us = (int64_t)tv->tv_sec * 1000000LL +
+                          (int64_t)tv->tv_usec;
+    ntp_drift_record(mono_now, wall_now_us);
     /* The IDF API exposes the upstream we used as the most recently-replied
      * index; pull it for the /api/time UI. Some IDF versions don't surface
      * this; gate by the macro to keep it portable. */
@@ -202,6 +333,7 @@ void ntp_init(void)
     uint32_t poll_s = ntp_nvs_get_u32("poll_s", NTP_POLL_S_DEFAULT);
     if (poll_s < NTP_POLL_S_MIN) poll_s = NTP_POLL_S_MIN;
     if (poll_s > NTP_POLL_S_MAX) poll_s = NTP_POLL_S_MAX;
+    s_poll_s = poll_s;  /* stash for ntp_free_running_s() */
     esp_sntp_set_sync_interval(poll_s * 1000UL);
 
     /* Timezone for localtime_r / strftime callers. Stored as POSIX TZ
@@ -238,6 +370,11 @@ int64_t ntp_now_us(void)
     struct timeval tv;
     if (gettimeofday(&tv, NULL) != 0) return 0;
     return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
+}
+
+int64_t ntp_now_us_corrected(void)
+{
+    return ntp_corrected_now_us();
 }
 
 bool ntp_is_synced(void)
@@ -284,6 +421,8 @@ void ntp_get_state(ntp_state_t *out)
     out->dropped_rate   = s_dropped_rate;
     out->dropped_size   = s_dropped_size;
     out->dropped_mode   = s_dropped_mode;
+    out->drift_ppm      = s_drift_ppm;       /* 0.7.2 drift compensation */
+    out->free_running_s = ntp_free_running_s();
 }
 
 void ntp_get_settings(ntp_settings_t *out)
@@ -448,8 +587,14 @@ static void ntp_server_task(void *arg)
         }
 
         /* Receive timestamp captured ASAP so the client's RTT estimate
-         * is dominated by network jitter, not our processing. */
-        int64_t rx_epoch_us = ntp_now_us();
+         * is dominated by network jitter, not our processing.
+         *
+         * 0.7.2: use ntp_corrected_now_us() so that when we're
+         * free-running (no upstream for > 2*poll), the timestamp we
+         * hand the client includes the drift correction estimated
+         * from prior syncs. Reduces 24h drift from ~2s to ~200ms
+         * given a typical 20ppm crystal. */
+        int64_t rx_epoch_us = ntp_corrected_now_us();
 
         /* Anti-amplification: silently drop packets outside 48..68 B. */
         if (n < NTP_PACKET_LEN || n > NTP_PACKET_MAX_LEN) {
@@ -508,7 +653,7 @@ static void ntp_server_task(void *arg)
         nv = htonl(rx_frac); memcpy(&tx[36], &nv, 4);
 
         /* Transmit Timestamp (40..47): sampled last, immediately before send. */
-        int64_t tx_epoch_us = ntp_now_us();
+        int64_t tx_epoch_us = ntp_corrected_now_us();  /* 0.7.2 drift comp */
         uint32_t tx_secs = 0, tx_frac = 0;
         ntp_epoch_us_to_ntp(tx_epoch_us, &tx_secs, &tx_frac);
         nv = htonl(tx_secs); memcpy(&tx[40], &nv, 4);

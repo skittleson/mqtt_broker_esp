@@ -2572,11 +2572,21 @@ static void handle_http_client(int client_fd)
          * Splitting client and server sub-objects keeps the JSON
          * self-documenting and lets dashboards distinguish 'we have time'
          * from 'we provide time'. */
+        /* drift_ppm: null when we don't yet have a valid estimate
+         * (< 2 syncs or baseline < 60s). free_running_s: 0 when within
+         * the normal poll interval. Both new in 0.7.2. */
+        char drift_json[32];
+        if (st.drift_ppm == INT32_MIN) {
+            snprintf(drift_json, sizeof(drift_json), "null");
+        } else {
+            snprintf(drift_json, sizeof(drift_json), "%ld", (long)st.drift_ppm);
+        }
         int len = snprintf(json, PAGE_BUF_SIZE,
             "{\"synced\":%s,\"epoch_us\":%lld,\"last_sync_age_s\":%lld,"
             "\"sync_count\":%u,\"upstream\":\"%s\","
             "\"server_running\":%s,\"stratum\":%u,\"served\":%u,"
-            "\"dropped\":{\"rate\":%u,\"size\":%u,\"mode\":%u}}",
+            "\"dropped\":{\"rate\":%u,\"size\":%u,\"mode\":%u},"
+            "\"drift_ppm\":%s,\"free_running_s\":%ld}",
             st.synced ? "true" : "false",
             (long long)st.epoch_us,
             (long long)st.last_sync_age_s,
@@ -2587,7 +2597,9 @@ static void handle_http_client(int client_fd)
             (unsigned)st.served,
             (unsigned)st.dropped_rate,
             (unsigned)st.dropped_size,
-            (unsigned)st.dropped_mode);
+            (unsigned)st.dropped_mode,
+            drift_json,
+            (long)st.free_running_s);
         http_response_start(client_fd, "200 OK", "application/json", len);
         http_send_body(client_fd, json, len);
 
@@ -2651,7 +2663,7 @@ static void handle_http_client(int client_fd)
          * synced variant: ~80 chars of fixed text + up to 63 chars of
          * upstream hostname + a couple of numbers. 256 is generous and
          * silences -Wformat-truncation. */
-        char client_line[256], server_line[256];
+        char client_line[256], server_line[512];
         if (st.synced) {
             snprintf(client_line, sizeof(client_line),
                 "<span style='color:#a5d6a7'>synced</span> \xc2\xb7 "
@@ -2665,13 +2677,30 @@ static void handle_http_client(int client_fd)
                 st.upstream_used[0] ? st.upstream_used : "-");
         }
         if (st.server_running) {
+            /* 0.7.2: surface drift + free-running state. drift line is
+             * suffixed only when we have a measurement; when unknown
+             * we just omit it rather than show 'drift: ?'. */
+            char drift_suffix[160] = "";
+            if (st.drift_ppm != INT32_MIN) {
+                if (st.free_running_s > 0) {
+                    snprintf(drift_suffix, sizeof(drift_suffix),
+                        " \xc2\xb7 drift %+ld ppm \xc2\xb7 "
+                        "<span style='color:#ffcc80'>free-running %ds</span>",
+                        (long)st.drift_ppm, (int)st.free_running_s);
+                } else {
+                    snprintf(drift_suffix, sizeof(drift_suffix),
+                        " \xc2\xb7 drift %+ld ppm",
+                        (long)st.drift_ppm);
+                }
+            }
             snprintf(server_line, sizeof(server_line),
                 "<span style='color:#a5d6a7'>serving</span> on UDP:123 \xc2\xb7 "
                 "stratum %u \xc2\xb7 %u served \xc2\xb7 "
-                "dropped %u/%u/%u (rate/size/mode)",
+                "dropped %u/%u/%u (rate/size/mode)%s",
                 (unsigned)st.stratum, (unsigned)st.served,
                 (unsigned)st.dropped_rate, (unsigned)st.dropped_size,
-                (unsigned)st.dropped_mode);
+                (unsigned)st.dropped_mode,
+                drift_suffix);
         } else {
             snprintf(server_line, sizeof(server_line),
                 "<span style='color:#888'>server off</span>");

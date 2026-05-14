@@ -1549,7 +1549,12 @@ static void broker_task(void *arg)
             char payload[24];
             int pl;
             if (ntp_is_synced()) {
-                int64_t epoch_us = ntp_now_us();
+                /* Use the drift-compensated reading so $SYS/broker/time
+                 * stays close to true-UTC even after a long free-running
+                 * stretch. 0.7.1 and earlier published raw
+                 * gettimeofday() which drifted with the local oscillator
+                 * (~20 ppm = ~1.7s/24h on this hardware). */
+                int64_t epoch_us = ntp_now_us_corrected();
                 if (epoch_us > 0) {
                     pl = snprintf(payload, sizeof(payload), "%lld",
                                   (long long)(epoch_us / 1000000));
@@ -1583,6 +1588,27 @@ static void broker_task(void *arg)
                               (unsigned)st.served);
                 static const char tserved[] = "$SYS/broker/ntp/served";
                 handle_publish_internal(tserved, (uint16_t)(sizeof(tserved) - 1),
+                                        (const uint8_t *)payload, (uint32_t)pl,
+                                        /*retain=*/true, /*pub_qos=*/0);
+                /* 0.7.2 drift telemetry. drift_ppm is signed and may be
+                 * INT32_MIN when unknown (< 2 syncs / < 60s baseline);
+                 * publish empty payload in that case so subscribers can
+                 * trivially distinguish 'unknown' from '0 ppm'. */
+                if (st.drift_ppm == INT32_MIN) {
+                    pl = 0;
+                    payload[0] = '\0';
+                } else {
+                    pl = snprintf(payload, sizeof(payload), "%ld",
+                                  (long)st.drift_ppm);
+                }
+                static const char tdrift[] = "$SYS/broker/ntp/drift_ppm";
+                handle_publish_internal(tdrift, (uint16_t)(sizeof(tdrift) - 1),
+                                        (const uint8_t *)payload, (uint32_t)pl,
+                                        /*retain=*/true, /*pub_qos=*/0);
+                pl = snprintf(payload, sizeof(payload), "%ld",
+                              (long)st.free_running_s);
+                static const char tfr[] = "$SYS/broker/ntp/free_running_s";
+                handle_publish_internal(tfr, (uint16_t)(sizeof(tfr) - 1),
                                         (const uint8_t *)payload, (uint32_t)pl,
                                         /*retain=*/true, /*pub_qos=*/0);
             }
