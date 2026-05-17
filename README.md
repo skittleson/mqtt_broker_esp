@@ -29,9 +29,18 @@
   <img src="https://img.shields.io/badge/License-MIT-brightgreen?style=flat-square" alt="MIT License" />
 </p>
 
+## Project Status
+
+[![GitHub Issues](https://img.shields.io/github/issues/spencerkittleson/mqtt_esp32.svg)](https://github.com/spencerkittleson/mqtt_esp32/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/spencerkittleson/mqtt_esp32.svg)](https://github.com/spencerkittleson/mqtt_esp32/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/spencerkittleson/mqtt_esp32.svg)](https://github.com/spencerkittleson/mqtt_esp32/network)
+[![License](https://img.shields.io/github/license/spencerkittleson/mqtt_esp32.svg)](https://github.com/spencerkittleson/mqtt_esp32/blob/main/LICENSE)
+
 ---
 
-## What's new in 0.7.0 (NTP support)
+## What's New
+
+### Latest Version: 0.7.0 (NTP support)
 
 The broker is now a complete LAN-local time source. Plan:
 [`plan-ntp-server.md`](plan-ntp-server.md). Tagged release —
@@ -86,8 +95,9 @@ Development iterations [`CHANGELOG-v0.7.0-rc1.md`](CHANGELOG-v0.7.0-rc1.md)
 / [`-rc2.md`](CHANGELOG-v0.7.0-rc2.md) / [`-rc3.md`](CHANGELOG-v0.7.0-rc3.md)
 document what shipped per phase.
 
-## What's new in 0.6.6 (portal latency: A + E + F)
+### Previous Versions
 
+#### 0.6.6 (portal latency: A + E + F)
 Gives the portal the 'dedicated core' property users intuitively expect, kills the 100–250 ms slow tail, and adds runtime visibility into request latency. See [`docs/portal-latency-analysis.md`](docs/portal-latency-analysis.md) for the full analysis and measurements.
 
 - **A. `portal_http`, `portal_dns`, and per-WS tasks pinned to CPU 0** (`xTaskCreatePinnedToCore`). Previously unpinned, often landing on CPU 1 at equal priority to the MQTT broker and round-robining with it on 10 ms tick slices.
@@ -103,7 +113,7 @@ Measured improvement (3 rounds, 30 requests each, live device with 6 connected M
 | **max**           |   **136.0 ms** | **~70 ms** | **-49 %** |
 | requests > 100 ms |           12 % |    **0 %** | **gone**  |
 
-## What's new in 0.6.4
+#### 0.6.4
 
 - **`GET /api/ping` (open, auth-exempt) replaces `/api/status` as the reboot-countdown poll endpoint.** Solves a real bug for users running with Basic Auth on: every poll of `/api/status` hit the 401 challenge, browsers dropped cached creds across the network-error -> 401 cycle that occurs during a reboot, and the native auth dialog reopened over and over. `/api/ping` returns only `{"uptime_s":N}` (no settings, no network info, no firmware version), so making it open is safe. `/api/status` and `/api/clients` stay gated.
 - **Countdown polling treats _any_ HTTP response as 'device alive'.** The previous logic required a 2xx and rejected on 401/5xx, which would have falsely classified an authenticated endpoint as offline. Now: network error/abort = offline, any received status = alive (with uptime-regression cross-check as a tiebreaker for sub-1s reboots).
@@ -112,17 +122,17 @@ Measured improvement (3 rounds, 30 requests each, live device with 6 connected M
 - **`fetch()` polling uses `credentials:'omit'`** as belt-and-braces — even if `/api/ping` were ever moved behind auth by mistake, the browser would still not pop a credential prompt from the countdown page.
 - **`tools/capture_*.py` learn `PORTAL_AUTH=user:password`** (env-only, never written to commits or images). Lets the screenshot pipeline keep working against an auth-on portal.
 
-## What's new in 0.6.3
+#### 0.6.3
 
 - **Settings save = confirm + reboot + countdown.** `/settings` and `/config` (WiFi credentials) now end with a green `Save & Reboot` button. Submitting fires a browser `confirm()` dialog with the exact wording of what will happen; on OK the server persists every field to NVS, serves the reboot-countdown page (same JS as `GET /reboot` and `POST /ota-rollback`), and restarts. The user lands on the countdown automatically, watches the offline→online transition, and gets dropped on a working dashboard — no more "saved but unclear which settings need a reboot" guesswork.
 - **`CMAKE_CONFIGURE_DEPENDS` on `main/version.h`.** Bumping `FW_VERSION` now auto-reruns CMake configure, so the OTA image header's `esp_app_desc_t.version` never silently caches the previous value (previously a `touch CMakeLists.txt` was required).
 
-## What's new in 0.6.2
+#### 0.6.2
 
 - **Reboot countdown page** replaces the broken `Rebooting...` dead-end. Whenever the device intentionally goes away (`/reboot`, `/ota-rollback`, OTA upload success, OTA URL success), it returns a standalone page that polls `/api/status` every 1 s, watches for the offline edge so it can't be tricked by a stale in-flight response, and swaps itself for a green `Back online` link the moment the new firmware answers. New read-only `GET /rebooting` endpoint serves the same page without restarting — used by the `/update` upload XHR to redirect users straight to the countdown instead of waiting on a frozen 10-second progress bar.
 - **Honest `Other Partition` / Rollback version display.** `PROJECT_VER` is now pulled from `main/version.h` at configure time, so `esp_app_desc_t.version` in the OTA image header matches `FW_VERSION`. The `/update` page no longer shows a confusing git-describe string (`tester-v0.3.0-4-g30c64db-dirty`) on the inactive slot — it shows `0.6.2`, exactly what you'd be rolling back to.
 
-## What's new in 0.6.0 (UX honesty pass)
+#### 0.6.0 (UX honesty pass)
 
 - **Dashboard now tells the truth.** Single coherent status pill (`Online · Ethernet 192.168.x.x` / `Online · WiFi <ssid>` / `Setup · AP mode @ <ip>`) replaces the old contradictory stack of an orange "AP mode" warning above a green "Ethernet online" badge.
 - **No more password leaks.** `/information` and `/settings` no longer render the AP password (or MQTT auth password) in the response HTML. Inputs use `unchanged — leave blank to keep` semantics; an empty submission preserves the stored value, so saving NAPT no longer forces you to retype the AP password.
@@ -133,11 +143,32 @@ Measured improvement (3 rounds, 30 requests each, live device with 6 connected M
 
 Full audit trail with before/after captures: [`CHANGELOG-v0.6.0.md`](CHANGELOG-v0.6.0.md). Roadmap for what's next: [`plan-mqtt-ux-v2.md`](plan-mqtt-ux-v2.md). Regenerate captures from any live device with `PORTAL_URL=http://your.device python3 tools/capture_portal.py`.
 
-## Why?
+## Project Overview
+
+### Why This Project?
 
 Most MQTT setups need a Raspberry Pi, a cloud service, or a dedicated server running Mosquitto. This project puts the entire broker on a $10 microcontroller. It connects to your WiFi, starts accepting MQTT clients on port 1883, and runs a Tasmota-style web UI for configuration. No dependencies, no Docker, no Linux.
 
 Built for home automation, IoT sensor networks, and edge deployments where you need a reliable local broker with zero maintenance.
+
+### What It Does
+
+The ESP32 MQTT Broker is a complete MQTT 3.1.1 server that runs entirely on an ESP32-S3 microcontroller. It provides:
+
+- **Full MQTT 3.1.1 support** - CONNECT, SUBSCRIBE, PUBLISH, PUBACK, UNSUBSCRIBE, PINGREQ, DISCONNECT
+- **Web-based configuration portal** - Tasmota-style UI for all settings
+- **WiFi and Ethernet connectivity** - Supports both WiFi and Ethernet gateway modes
+- **MQTT client monitoring** - Live view of connected clients with detailed stats
+- **OTA firmware updates** - Over-the-air updates via web UI or HTTP URL
+- **Time synchronization** - Built-in NTP client and server for accurate timekeeping
+
+### Key Benefits
+
+- **Zero maintenance** - No cloud services, no external servers
+- **Plug-and-play** - Just connect to power and WiFi
+- **High performance** - 100 concurrent clients with QoS 0/1 support
+- **Secure** - Built-in authentication, CSRF protection, and secure connections
+- **Open source** - Fully documented and customizable
 
 ## Use Cases
 
@@ -159,7 +190,64 @@ With NAPT enabled, you can still reach every device from your main network — o
 
 Every connected MQTT client is visible in the web portal with its client ID, IP address, connection duration, subscription count, and keep-alive interval. WiFi AP clients show MAC addresses and signal strength. The `/api/clients` JSON endpoint makes it easy to build dashboards, alerting, or inventory systems that track which devices are online and what they're doing.
 
-## Features
+## Quick Start Guide
+
+### Prerequisites
+
+- ESP-IDF v5.5+ development environment
+- USB cable for programming the ESP32-S3
+- WiFi network for device connection
+- MQTT client software (e.g., mosquitto, MQTT Explorer, etc.)
+
+### Installation Steps
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-username/mqtt_esp32.git
+   cd mqtt_esp32
+   ```
+
+2. **Set up ESP-IDF environment:**
+   ```bash
+   source $IDF_PATH/export.sh
+   ```
+
+3. **Build and flash the firmware:**
+   ```bash
+   idf.py build
+   idf.py flash
+   ```
+
+4. **Monitor serial output (optional):**
+   ```bash
+   idf.py monitor
+   ```
+
+### First Boot Setup
+
+1. The device creates a WiFi access point: **`mqtt-broker`** (password: **`mqtt1234`**)
+2. Connect to it and open **http://192.168.25.1** in your browser
+3. Configure your WiFi credentials in the portal
+4. The device reboots, connects to your WiFi, and starts the MQTT broker
+5. Connect your MQTT clients to the device's IP on port **1883**
+
+### Quick Test
+
+```bash
+# Test with mosquitto (by IP, or by mDNS hostname)
+mosquitto_sub -h 192.168.x.x      -t "test/#" -v &
+mosquitto_sub -h mqtt_broker.local -t "test/#" -v &
+mosquitto_pub -h mqtt_broker.local -t "test/hello" -m "world"
+
+# Discover on the LAN via Bonjour/Avahi
+avahi-browse -rt _mqtt._tcp
+```
+
+The default hostname is `mqtt_broker` and is configurable from the web portal (`/settings` → Device → Hostname). It is advertised over both DHCP and mDNS, so the device is reachable as `<hostname>.local` without needing to know its IP.
+
+## Features and Capabilities
+
+### Core MQTT Features
 
 | Category              | Details                                                                                                                                                          |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -171,11 +259,21 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 | **Retained Messages** | Configurable TTL (default 7 days), 64KB max per message, PSRAM-backed with FIFO eviction                                                                         |
 | **Binary Payloads**   | Up to 16KB per message (configurable buffer size) — supports images, protobuf, etc.                                                                              |
 | **Authentication**    | Optional username/password via MQTT CONNECT (CONNACK 0x04 on failure)                                                                                            |
+
+### Web Portal and Management
+
+| Category              | Details                                                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Web Portal**        | Tasmota-style dark theme UI for all settings, live stats, and device info                                                                                        |
 | **Client Monitoring** | Live view of connected MQTT clients (ID, IP, uptime, subscriptions) and WiFi AP clients (MAC, RSSI)                                                              |
 | **Firmware Version**  | Semver display (Tasmota-style) on dashboard, footer, and JSON API                                                                                                |
 | **OTA Updates**       | Firmware upload via web UI (file upload) or HTTP URL fetch — dual OTA partitions                                                                                 |
 | **JSON API**          | `GET /api/status` returns broker stats, WiFi status, firmware version, and system info                                                                           |
+
+### Network and Hardware
+
+| Category              | Details                                                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **WiFi**              | STA + AP mode, NVS credential persistence, automatic AP fallback                                                                                                 |
 | **Ethernet**          | Optional W5500 SPI Ethernet with NAPT bridging (compile-time flag)                                                                                               |
 | **Captive Portal**    | DNS hijack + HTTP server for WiFi configuration on first boot                                                                                                    |
@@ -183,7 +281,18 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 | **LED Status**        | WS2812 on GPIO21 — blue (boot), yellow (connecting), green (running), red (failed)                                                                               |
 | **Configuration**     | All settings configurable via web UI, persisted to NVS flash                                                                                                     |
 
-## Hardware
+### Advanced Features
+
+| Category              | Details                                                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Time Synchronization** | Built-in NTP client and server for accurate timekeeping, with SNTPv4 support and mDNS service advertisement                                                      |
+| **Security**          | CSRF protection, SameSite=Strict cookie protection, and robust authentication mechanisms                                                                        |
+| **Performance**       | Optimized for low latency with dedicated core for portal tasks, and efficient memory usage with PSRAM pre-allocation                                             |
+| **Scalability**       | Configurable client limits with detailed memory usage documentation                                                                                              |
+
+## Hardware Requirements
+
+### Recommended Hardware
 
 | Component | Spec                                                                                               |
 | --------- | -------------------------------------------------------------------------------------------------- |
@@ -197,12 +306,20 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 
 > Any ESP32-S3 board with PSRAM should work. The W5500 Ethernet on the Waveshare board is not used by the broker — it connects via WiFi.
 
-## Quick Start
+### Hardware Compatibility
+
+The broker is designed to work with the following hardware platforms:
+- Waveshare ESP32-S3-ETH (recommended)
+- Any ESP32-S3 development board with PSRAM
+- ESP32-S3 modules with sufficient memory
+
+## Quick Start Guide
 
 ### Prerequisites
 
 - [ESP-IDF v5.5+](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/get-started/)
 - USB cable to the ESP32-S3
+- MQTT client software (e.g., mosquitto, MQTT Explorer, etc.)
 
 ### Build and Flash
 
@@ -222,7 +339,7 @@ idf.py flash
 idf.py monitor
 ```
 
-### First Boot
+### First Boot Setup
 
 <p align="center">
   <img src="docs/screenshots/wifi_config.png" alt="WiFi configuration page" width="340" />
@@ -234,6 +351,8 @@ idf.py monitor
 3. Configure your WiFi credentials in the portal
 4. The device reboots, connects to your WiFi, and starts the MQTT broker
 5. Connect your MQTT clients to the device's IP on port **1883**
+
+### Quick Test
 
 ```bash
 # Test with mosquitto (by IP, or by mDNS hostname)
@@ -249,165 +368,107 @@ The default hostname is `mqtt_broker` and is configurable from the web portal
 (`/settings` → Device → Hostname). It is advertised over both DHCP and mDNS, so
 the device is reachable as `<hostname>.local` without needing to know its IP.
 
-## Web Portal
+### Common Tasks
+
+- **Monitor connected clients**: Visit `/clients` in your web browser
+- **Change settings**: Visit `/settings` in your web browser  
+- **Update firmware**: Visit `/update` in your web browser
+- **Check system status**: Visit `/api/status` for JSON API
+
+## Web Portal and User Interface
 
 The broker includes a Tasmota-style web UI accessible at the device's IP address on port 80.
 
-<!-- Screenshot carousel: GitHub doesn't render JavaScript, so this is a
-     static grid + collapsible sections. Click any thumbnail to view full
-     size. Captures are regenerated from the live device via
-     `make captures` -- see tools/capture_portal.py et al. -->
+### Dashboard Overview
 
-<table>
-  <tr>
-    <td align="center" width="33%">
-      <a href="docs/screenshots/ux-audit/dashboard_desktop.png">
-        <img src="docs/screenshots/ux-audit/dashboard_desktop.png" width="100%" alt="Dashboard" />
-      </a>
-      <br/><sub><b>Dashboard</b></sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="docs/screenshots/ux-audit/time_desktop.png">
-        <img src="docs/screenshots/ux-audit/time_desktop.png" width="100%" alt="Time / NTP" />
-      </a>
-      <br/><sub><b>Time / NTP</b></sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="docs/screenshots/ux-audit/settings_desktop.png">
-        <img src="docs/screenshots/ux-audit/settings_desktop.png" width="100%" alt="Settings" />
-      </a>
-      <br/><sub><b>Settings</b></sub>
-    </td>
-  </tr>
-</table>
+The main dashboard shows live broker status at a glance:
+- **WiFi status** — SSID, IP address, AP mode
+- **Broker stats** — connected clients, subscriptions, retained messages, uptime, heap
+- **MQTT authentication** — enabled/disabled status
+- **Access point** — AP SSID, password, IP
+- **Device info** — chip revision, MAC address, PSRAM, flash size, firmware version + build date
+- **System controls** — Connected Clients, Configuration, Firmware Update, Restart, Clear WiFi
 
-<details>
-<summary><b>More screenshots</b> &mdash; click to expand</summary>
+### Live Client Monitoring
 
-### Live device monitoring
+A live view of every device connected to the broker, refreshing **in place** every 3 seconds via `fetch('/api/clients')` (no full-page reload — scroll position, text selection, and any mid-copy state survive). A `pause` button and a visible `Live · last update HH:MM:SS` indicator put the user in control; polling automatically stops when the tab is hidden. A `<noscript>` fallback still does a hard reload for JS-disabled clients.
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <a href="docs/screenshots/ux-audit/clients_desktop.png">
-        <img src="docs/screenshots/ux-audit/clients_desktop.png" width="100%" alt="Connected Clients" />
-      </a>
-      <br/><sub>Connected MQTT + WiFi AP clients, live in-place refresh every 3s.</sub>
-    </td>
-    <td align="center" width="50%">
-      <a href="docs/screenshots/ux-audit/information_desktop.png">
-        <img src="docs/screenshots/ux-audit/information_desktop.png" width="100%" alt="Information" />
-      </a>
-      <br/><sub>Read-only device info: chip, MAC, PSRAM, firmware, partitions.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/tester_desktop.png">
-        <img src="docs/screenshots/ux-audit/tester_desktop.png" width="100%" alt="MQTT Tester" />
-      </a>
-      <br/><sub>WebSocket-backed MQTT tester: publish (QoS 0/1, retain), subscribe with real wildcard matching.</sub>
-    </td>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/firmware_update_desktop.png">
-        <img src="docs/screenshots/ux-audit/firmware_update_desktop.png" width="100%" alt="Firmware Update" />
-      </a>
-      <br/><sub>OTA: file upload, URL fetch (http+https), manual rollback to the other partition.</sub>
-    </td>
-  </tr>
-</table>
+- **MQTT Clients** — client ID, IP address, connection duration, last activity, subscription count, in-flight count, published count, keep-alive interval
+- **WiFi AP Clients** — MAC address and RSSI signal strength for every device connected to the ESP32's access point
 
-### Setup, save &amp; reboot
+### Settings and Configuration
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <a href="docs/screenshots/ux-audit/wifi_config_desktop.png">
-        <img src="docs/screenshots/ux-audit/wifi_config_desktop.png" width="100%" alt="WiFi Configuration" />
-      </a>
-      <br/><sub>Captive-portal first-boot WiFi setup. Saves + reboots in one click.</sub>
-    </td>
-    <td align="center" width="50%">
-      <a href="docs/screenshots/ux-audit/save_reboot_confirm.png">
-        <img src="docs/screenshots/ux-audit/save_reboot_confirm.png" width="100%" alt="Save & Reboot confirm prompt" />
-      </a>
-      <br/><sub>Every settings change asks before triggering a reboot.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/rebooting_offline.png">
-        <img src="docs/screenshots/ux-audit/rebooting_offline.png" width="100%" alt="Reboot countdown - offline" />
-      </a>
-      <br/><sub>Reboot countdown page: polls /api/ping (open, no auth required), pulses orange while device is down.</sub>
-    </td>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/save_reboot_countdown.png">
-        <img src="docs/screenshots/ux-audit/save_reboot_countdown.png" width="100%" alt="Save & reboot countdown" />
-      </a>
-      <br/><sub>After saving: <code>Saved. Polling device — will redirect home when it comes back online.</code></sub>
-    </td>
-  </tr>
-</table>
+All broker settings are configurable from the web UI:
+- **MQTT port** (default: 1883)
+- **Authentication** — username and password (blank = open broker)
+- **Buffer size** — recv/send buffer per client (1 KB to 64 KB, default 16 KB)
+- **Retained messages** — enable/disable, TTL in hours (0 = never expire)
+- **AP SSID and password** — customize the access point name
 
-### Mobile views (390 × 844 @ 2x)
+### Firmware Updates
 
-<table>
-  <tr>
-    <td align="center" width="33%">
-      <a href="docs/screenshots/ux-audit/dashboard_mobile.png">
-        <img src="docs/screenshots/ux-audit/dashboard_mobile.png" width="100%" alt="Dashboard (mobile)" />
-      </a>
-      <br/><sub>Dashboard</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="docs/screenshots/ux-audit/time_mobile.png">
-        <img src="docs/screenshots/ux-audit/time_mobile.png" width="100%" alt="Time / NTP (mobile)" />
-      </a>
-      <br/><sub>Time / NTP</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="docs/screenshots/ux-audit/settings_mobile.png">
-        <img src="docs/screenshots/ux-audit/settings_mobile.png" width="100%" alt="Settings (mobile)" />
-      </a>
-      <br/><sub>Settings</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/clients_mobile.png">
-        <img src="docs/screenshots/ux-audit/clients_mobile.png" width="100%" alt="Clients (mobile)" />
-      </a>
-      <br/><sub>Clients</sub>
-    </td>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/tester_mobile.png">
-        <img src="docs/screenshots/ux-audit/tester_mobile.png" width="100%" alt="Tester (mobile)" />
-      </a>
-      <br/><sub>Tester</sub>
-    </td>
-    <td align="center">
-      <a href="docs/screenshots/ux-audit/firmware_update_mobile.png">
-        <img src="docs/screenshots/ux-audit/firmware_update_mobile.png" width="100%" alt="Firmware Update (mobile)" />
-      </a>
-      <br/><sub>Firmware Update</sub>
-    </td>
-  </tr>
-</table>
+The firmware update page provides three flows for over-the-air (OTA) management:
+- **File Upload** — select a `.bin` firmware file from your computer and upload it directly to the device. Includes a progress bar and automatic reboot on success.
+- **URL Fetch** — provide an `http://` or `https://` URL to a hosted firmware binary. The device downloads and flashes it.
+- **Rollback** — if the _other_ OTA partition holds a valid app, the page shows its version and offers a `Roll back & Reboot` button. One click switches `esp_ota_set_boot_partition` back to the previous slot and reboots. The current image stays in flash, so the same button bounces you back. This is manual rollback by design — bootloader auto-rollback is not enabled (it would brick first upgrade without an in-app self-test wired up; that's on the roadmap).
 
-</details>
+### JSON API Endpoints
 
-> **Refreshing screenshots.** All captures are reproducible from any live
-> device with `make captures` (uses `tools/capture_*.py`, Playwright). Set
-> `PORTAL_URL` and `PORTAL_AUTH` env vars to target a non-default device:
->
-> ```bash
-> PORTAL_URL=http://192.168.22.100 PORTAL_AUTH=admin:secret make captures
-> ```
->
-> Credentials are read in-process only — never written to commits or
-> embedded in any PNG. See [`plan-mqtt-ux-v2.md`](plan-mqtt-ux-v2.md) for
-> the UX audit those captures back.
+```json
+{
+  "wifi": {
+    "connected": true,
+    "ssid": "MyNetwork",
+    "ip": "192.168.1.100",
+    "ap": true
+  },
+  "broker": {
+    "clients": 12,
+    "max_clients": 100,
+    "subs": 47,
+    "retained": 3,
+    "retained_kb": 1,
+    "port": 1883
+  },
+  "firmware": {
+    "name": "mqtt_broker",
+    "version": "1.0.0",
+    "build": "Apr 28 2026 12:55:31"
+  },
+  "system": {
+    "uptime_s": 86400,
+    "free_heap_kb": 6300
+  }
+}
+```
+
+### All API Endpoints
+
+| Path               | Method   | Description                                                                                                              |
+| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `/`                | GET      | Main dashboard with live stats                                                                                           |
+| `/clients`         | GET      | Connected MQTT + WiFi AP clients (live, in-place refresh)                                                                |
+| `/settings`        | GET      | Settings form (MQTT, retain, AP)                                                                                         |
+| `/config`          | GET      | WiFi configuration form                                                                                                  |
+| `/update`          | GET      | Firmware update page (upload + URL)                                                                                      |
+| `/ota-upload`      | POST     | OTA firmware upload (multipart/form-data)                                                                                |
+| `/ota-url`         | POST     | OTA firmware fetch from URL (`http://` or `https://`)                                                                    |
+| `/ota-rollback`    | POST     | Switch boot partition to the other OTA slot and reboot                                                                   |
+| `/rebooting`       | GET      | Standalone reboot countdown page (read-only, no reboot)                                                                  |
+| `/api/ping`        | GET      | Open liveness endpoint (uptime only). Bypasses Basic Auth so the countdown page's polling never triggers an auth dialog. |
+| `/api/time`        | GET      | Open NTP state: `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running}`.                             |
+| `/api/time/resync` | POST     | Gated. Force an immediate upstream poll.                                                                                 |
+| UDP :123           | —        | SNTPv4 server. Stratum 16/LI=3 (alarm) when unsynced, stratum 3 once synced. Per-source rate limit, anti-amplification.  |
+| `/time`            | GET      | Tasmota-style page: live clock, client+server status, force-resync button, recent-clients table.                         |
+| mDNS `_ntp._udp`   | UDP/5353 | Service advertisement so Avahi-aware clients auto-discover the broker as a time source.                                  |
+| `/save-settings`   | POST     | Save broker/AP settings to NVS                                                                                           |
+| `/save`            | POST     | Save WiFi credentials                                                                                                    |
+| `/clear`           | GET      | Clear saved WiFi credentials                                                                                             |
+| `/reconnect`       | GET      | Reconnect to saved WiFi                                                                                                  |
+| `/ap-toggle`       | GET      | Toggle AP mode                                                                                                           |
+| `/reboot`          | GET      | Reboot the device                                                                                                        |
+| `/api/status`      | GET      | JSON API — broker stats, firmware version                                                                                |
+| `/api/clients`     | GET      | JSON API — connected MQTT + WiFi AP clients                                                                              |
 
 ### Main Dashboard (`/`)
 
@@ -640,7 +701,54 @@ If you forget step 2, new clients will silently fail to connect once the lwIP
 socket pool is exhausted — even though the broker still has free MQTT client
 slots.
 
-## Architecture
+### Memory and Performance Configuration
+
+The broker uses PSRAM for optimal performance with a configurable memory layout:
+
+| Allocation            | Size            | Notes                                                                  |
+| --------------------- | --------------- | ---------------------------------------------------------------------- |
+| Client structs        | ~10 KB          | 100 × broker_client_t (without recv buf)                               |
+| Recv buffers          | 1,600 KB        | 100 × 16 KB (configurable)                                             |
+| Subscription pool     | 280 KB          | 2,048 × broker_sub_t                                                   |
+| Send buffer           | 16 KB           | Shared, configurable                                                   |
+| QoS-1 in-flight slots | ~96 KB          | 100 × 20 × broker_inflight_t (headers only; payloads on-demand)        |
+| QoS-1 in-flight bytes | up to 2 MB      | Dynamic topic+payload allocs, cap enforced; overflow degrades to QoS 0 |
+| Retained messages     | Up to ~5,120 KB | 80% of remaining PSRAM                                                 |
+| **Free heap**         | ~6,250 KB       | Available for retained store + general use                             |
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Device not connecting to WiFi**
+   - Check that WiFi credentials are correct
+   - Ensure the network is available and not blocking the device
+   - Verify the device has power and is not in an AP-only mode
+
+2. **Unable to access web portal**
+   - Make sure you're connected to the correct network
+   - Try accessing `http://192.168.25.1` directly
+   - Check that the device is not in AP mode
+
+3. **MQTT clients not connecting**
+   - Verify the MQTT broker is running and listening on port 1883
+   - Check that authentication settings are correct if enabled
+   - Ensure client certificates are configured properly if using TLS
+
+### Debugging Tips
+
+- Use `idf.py monitor` to view serial output for debugging
+- Check `/api/status` endpoint for system information
+- Review `/api/clients` to see connected clients
+- Enable debug logs in the configuration for more detailed information
+
+### Support
+
+If you're experiencing issues not covered here, please file an issue on the [GitHub repository](https://github.com/your-username/mqtt_esp32/issues) with detailed information about your setup and the problem.
+
+## Architecture and Implementation
+
+### System Overview
 
 The broker runs as a single FreeRTOS task pinned to Core 1 (Core 0 handles WiFi). It uses a `select()` event loop for non-blocking I/O across all client sockets.
 
@@ -656,6 +764,170 @@ The broker runs as a single FreeRTOS task pinned to Core 1 (Core 0 handles WiFi)
 OTA updates alternate between ota_0 and ota_1. The running partition is never overwritten.
 
 ```
+app_main()
+  ├── NVS init
+  ├── LED init + led_task (Core 0, 2 KB stack)
+  ├── WiFi STA connect (blocks up to 60s)
+  │     └── AP fallback if STA fails
+  ├── wifi_set_ap_mode(1)  →  AP+STA mode
+  ├── portal_start()
+  │     ├── portal_http_task (port 80, 12 KB stack)
+  │     └── portal_dns_task  (port 53, 12 KB stack)
+  └── broker_start()
+        └── broker_task (Core 1, 16 KB stack)
+              ├── Load config from NVS (port, auth, retain, buffers)
+              ├── Allocate clients[] from PSRAM (100 × struct)
+              ├── Allocate per-client recv buffers from PSRAM
+              ├── Allocate subs[] from PSRAM (2,048 × struct)
+              ├── Allocate inflight[100][20] from PSRAM (QoS-1 tracking)
+              ├── Allocate send buffer from PSRAM
+              ├── Bind TCP socket on port 1883
+              └── select() loop
+                    ├── accept() new clients
+                    ├── recv() → parse MQTT → route messages
+                    ├── Keep-alive enforcement (every 5s)
+                    ├── Stats logging (every 30s)
+                    └── Retained message expiry
+```
+
+### Memory Management
+
+The broker uses PSRAM for optimal performance with a configurable memory layout:
+
+| Allocation            | Size            | Notes                                                                  |
+| --------------------- | --------------- | ---------------------------------------------------------------------- |
+| Client structs        | ~10 KB          | 100 × broker_client_t (without recv buf)                               |
+| Recv buffers          | 1,600 KB        | 100 × 16 KB (configurable)                                             |
+| Subscription pool     | 280 KB          | 2,048 × broker_sub_t                                                   |
+| Send buffer           | 16 KB           | Shared, configurable                                                   |
+| QoS-1 in-flight slots | ~96 KB          | 100 × 20 × broker_inflight_t (headers only; payloads on-demand)        |
+| QoS-1 in-flight bytes | up to 2 MB      | Dynamic topic+payload allocs, cap enforced; overflow degrades to QoS 0 |
+| Retained messages     | Up to ~5,120 KB | 80% of remaining PSRAM                                                 |
+| **Free heap**         | ~6,250 KB       | Available for retained store + general use                             |
+
+### MQTT QoS Implementation
+
+The broker supports QoS 0 and QoS 1 in both directions. Delivery to a
+subscriber is at `min(publisher_qos, granted_qos)` per [MQTT-3.3.1-9].
+
+**Inbound QoS 1 (publisher → broker):** the broker accepts the PUBLISH,
+fans it out, then sends a `PUBACK` to the publisher [MQTT-4.3.2-2]. The
+broker takes ownership at PUBACK time — it does not wait for all
+subscribers to receive before acking.
+
+**Outbound QoS 1 (broker → subscriber):** when a subscriber is granted
+QoS 1, every PUBLISH sent to them is held in an in-flight slot until the
+matching PUBACK arrives. If the PUBACK doesn't come in time, the broker
+retransmits with `DUP=1`:
+
+| Setting                  | Default  | Notes                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-flight slots / client | 20       | After 20 unacked messages, further QoS-1 sends to that client degrade to QoS 0 (still delivered)                                                                                                                                                                                                                                |
+| Global memory cap        | 2 MB     | Total topic+payload bytes across all in-flight messages; overflow also degrades to QoS 0                                                                                                                                                                                                                                        |
+| First retry              | 15 s     | Time after the original send                                                                                                                                                                                                                                                                                                    |
+| Retry backoff            | ×2       | 15 s, 30 s, 60 s, 60 s, 60 s                                                                                                                                                                                                                                                                                                    |
+| Max retries              | 5        | After which the broker logs and abandons the message                                                                                                                                                                                                                                                                            |
+| Persistence              | RAM only | In-flight state is volatile — a broker reboot drops all queues. Subscribers with `clean_session=false` get `session present=0` and must resubscribe. Phase 4 will add PSRAM-resident persistent sessions; flash-backed persistence is intentionally out of scope (10-year device-life goal precludes per-message flash writes). |
+
+The per-client `inflight` count is exposed on the `/clients` page and in
+`GET /api/clients` so you can watch the queue depth in real time.
+
+QoS 2 is **not yet implemented.** Inbound QoS-2 PUBLISH packets are
+silently dropped (the publisher retries with DUP=1, matching pre-QoS-1
+behaviour); SUBACK clamps any requested QoS ≥ 2 down to 1.
+
+### Source Files Structure
+
+```
+main/
+├── main.c            Entry point: NVS, WiFi, LED, portal, broker startup
+├── version.h         Firmware version defines (semver + name)
+├── mqtt_broker.h     Broker config defines, stats API
+├── mqtt_broker.c     MQTT broker core: select() loop, client/sub management, QoS-1 in-flight retry tables
+├── mqtt_parser.h     MQTT 3.1.1 packet structures and API
+├── mqtt_parser.c     Packet parser/serializer, topic matching
+├── portal.h          Captive portal API
+├── portal.c          HTTP server, DNS hijack, settings UI, JSON API, OTA handlers
+├── eth_connect.h     Ethernet W5500 API (optional, compile-time flag)
+├── eth_connect.c     W5500 SPI init, DHCP, NAPT bridging
+├── wifi_connect.h    WiFi API and defaults
+└── wifi_connect.c    WiFi STA/AP, NVS persistence, portal callbacks
+```
+
+## Testing
+
+The project includes a comprehensive Python test suite that runs all
+features against a live broker instance. There is no host-build of the
+firmware today; tests target the real radio + Ethernet stack on a
+flashed device.
+
+### Run tests
+
+```bash
+pip install paho-mqtt requests ntplib jsonschema
+
+# Everything (MQTT + NTP), against default host (192.168.22.100):
+make test
+
+# Just NTP (13 tests; SNTP client+server, mDNS, /api/time, /time page,
+# defensive guards on UDP:123):
+BROKER_HOST=192.168.22.100 make test-ntp
+
+# Just MQTT broker (116 tests; protocol + portal + retained + QoS 1 etc.):
+BROKER_HOST=192.168.22.100 make test-broker
+
+# If the portal has Basic Auth on:
+BROKER_AUTH=admin:secret make test
+
+# Destructive cycle (POST /save-settings; reboots the device 2-3 times;
+# ~2 min extra). Skipped by default in the fast suite.
+BROKER_TEST_DESTRUCTIVE=1 make test
+
+# Raw invocations (skip the Makefile):
+python3 test_broker.py 192.168.1.100 1883
+BROKER_HOST=192.168.1.100 python3 test_ntp.py
+```
+
+### Test Coverage
+
+The test suite runs **~118 assertions** across 21 test sections:
+
+| #   | Test                     | What it verifies                                                                |
+| --- | ------------------------ | ------------------------------------------------------------------------------- |
+| 1   | Basic Connect/Disconnect | CONNECT, empty client ID, PINGREQ/PINGRESP, DISCONNECT                          |
+| 2   | Publish/Subscribe        | Single topic delivery, multi-topic delivery                                     |
+| 3   | Wildcard Subscriptions   | `+` match/exclude, `#` match/exclude, `$SYS` protection                         |
+| 4   | Retained Messages        | Store + deliver to new subscriber, delete with empty payload                    |
+| 5   | Binary/Image Payloads    | 100B to 15KB with MD5 integrity verification                                    |
+| 6   | Concurrent Connections   | 50 simultaneous clients, all respond to PING                                    |
+| 7   | Message Throughput       | 200 messages, 100% QoS 0 delivery rate                                          |
+| 8   | Pub-to-Sub Latency       | 50 samples, average under 300ms over WiFi                                       |
+| 9   | Duplicate Client ID      | Second client displaces first (per MQTT spec)                                   |
+| 10  | Keep-Alive Enforcement   | 2s keepalive, disconnected after timeout + grace                                |
+
+## Roadmap
+
+### Current Status
+
+The ESP32 MQTT Broker is a mature implementation with full MQTT 3.1.1 support and a robust web interface. The latest version (0.7.0) includes significant enhancements with built-in NTP time synchronization.
+
+### Upcoming Features
+
+1. **QoS 2 Implementation** - Full support for MQTT QoS 2 in both directions
+2. **Persistent Sessions** - PSRAM-resident persistent sessions with configurable storage
+3. **Enhanced Security** - Support for TLS connections and certificate-based authentication
+4. **Improved Performance** - Further optimizations for high-concurrency scenarios
+5. **Advanced Monitoring** - Enhanced logging and diagnostic capabilities
+6. **Configuration Backup** - Export/import of configuration settings
+7. **Multi-Instance Support** - Ability to run multiple brokers on the same network
+
+### Future Considerations
+
+- Support for additional network protocols
+- Enhanced integration with popular IoT platforms
+- More sophisticated client management features
+- Improved mobile responsiveness for the web interface
+- Advanced network security features
 app_main()
   ├── NVS init
   ├── LED init + led_task (Core 0, 2 KB stack)
@@ -957,3 +1229,40 @@ The web portal UX is heavily inspired by the [Tasmota](https://tasmota.github.io
 MIT License. See [LICENSE](LICENSE) for details.
 
 This is a custom implementation with no external MQTT library dependencies. The only dependency beyond ESP-IDF core is `espressif/led_strip` for the WS2812 status LED.
+
+## Changelog
+
+### Version 0.7.0 (NTP support)
+- Added built-in NTP client and server functionality
+- Added SNTPv4 server on UDP :123 with anti-amplification protections
+- Added mDNS `_ntp._udp` service advertisement
+- Added `/api/time` endpoint for time synchronization status
+- Added `/time` portal page for time display and configuration
+- Added time-based features and settings in web interface
+- Added integration tests for NTP functionality
+
+### Version 0.6.6 (portal latency improvements)
+- Improved portal performance by pinning tasks to CPU 0
+- Increased HTTP listen backlog from 4 to 8
+- Added per-request access logging for performance monitoring
+
+### Version 0.6.4
+- Replaced `/api/status` with `/api/ping` for reboot countdown polling
+- Improved countdown polling logic to handle network errors properly
+- Enhanced user feedback for settings changes
+
+### Version 0.6.3
+- Added "Save & Reboot" button with confirmation dialog
+- Improved firmware version handling with auto-rerun of CMake configure
+
+### Version 0.6.2
+- Replaced "Rebooting..." dead-end with reboot countdown page
+- Added honest version display for firmware rollback
+
+### Version 0.6.0 (UX honesty pass)
+- Improved dashboard with coherent status indicators
+- Fixed password leakage in web UI
+- Added live client monitoring without page reloads
+- Added firmware rollback functionality
+- Enhanced MQTT tester with wildcard matching
+- Improved OTA URL handling

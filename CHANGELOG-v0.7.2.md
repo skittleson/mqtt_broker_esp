@@ -50,21 +50,21 @@ so the system is honest about what's measured vs estimated.
 
 ### Code
 
-| File | Change |
-|---|---|
-| `main/ntp.h` | New fields in `ntp_state_t`: `drift_ppm` (`INT32_MIN` = unknown), `free_running_s`. New `ntp_now_us_corrected()` public accessor. |
-| `main/ntp.c` | 8-slot drift ring buffer, `ntp_drift_record()` in the sync callback, `ntp_corrected_now_us()` static helper used by SNTP server tx/rx timestamps. `s_poll_s` cached so `ntp_free_running_s()` can compute the 2×poll threshold. |
-| `main/mqtt_broker.c` | `$SYS/broker/time` uses `ntp_now_us_corrected()`. New retained topics `$SYS/broker/ntp/drift_ppm` (empty payload when unknown) and `$SYS/broker/ntp/free_running_s`. |
-| `main/portal.c` | `/api/time` JSON gains `drift_ppm` (number\|null) and `free_running_s` (int). `/time` page server status line gains "drift ±N ppm" suffix; when free-running, the suffix becomes "drift ±N ppm · free-running Ns" in orange. |
+| File                 | Change                                                                                                                                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main/ntp.h`         | New fields in `ntp_state_t`: `drift_ppm` (`INT32_MIN` = unknown), `free_running_s`. New `ntp_now_us_corrected()` public accessor.                                                                                               |
+| `main/ntp.c`         | 8-slot drift ring buffer, `ntp_drift_record()` in the sync callback, `ntp_corrected_now_us()` static helper used by SNTP server tx/rx timestamps. `s_poll_s` cached so `ntp_free_running_s()` can compute the 2×poll threshold. |
+| `main/mqtt_broker.c` | `$SYS/broker/time` uses `ntp_now_us_corrected()`. New retained topics `$SYS/broker/ntp/drift_ppm` (empty payload when unknown) and `$SYS/broker/ntp/free_running_s`.                                                            |
+| `main/portal.c`      | `/api/time` JSON gains `drift_ppm` (number\|null) and `free_running_s` (int). `/time` page server status line gains "drift ±N ppm" suffix; when free-running, the suffix becomes "drift ±N ppm · free-running Ns" in orange.    |
 
 ### Behaviour table
 
-| Sync count | Baseline | drift_ppm | Compensation |
-|---|---|---|---|
-| 0 | n/a | null | none (no clock) |
-| 1 | 0 | null | none |
-| 2+ | < 60 s | null | none (noise floor) |
-| 2+ | ≥ 60 s | measured | only when free-running > 2 × poll |
+| Sync count | Baseline | drift_ppm | Compensation                      |
+| ---------- | -------- | --------- | --------------------------------- |
+| 0          | n/a      | null      | none (no clock)                   |
+| 1          | 0        | null      | none                              |
+| 2+         | < 60 s   | null      | none (noise floor)                |
+| 2+         | ≥ 60 s   | measured  | only when free-running > 2 × poll |
 
 ### Telemetry
 
@@ -72,11 +72,15 @@ so the system is honest about what's measured vs estimated.
 
 ```json
 {
-  "synced": true, "epoch_us": 1778720353893528,
-  "last_sync_age_s": 9, "sync_count": 4,
+  "synced": true,
+  "epoch_us": 1778720353893528,
+  "last_sync_age_s": 9,
+  "sync_count": 4,
   "upstream": "pool.ntp.org",
-  "server_running": true, "stratum": 3, "served": 12,
-  "dropped": {"rate": 0, "size": 0, "mode": 0},
+  "server_running": true,
+  "stratum": 3,
+  "served": 12,
+  "dropped": { "rate": 0, "size": 0, "mode": 0 },
   "drift_ppm": -35,
   "free_running_s": 0
 }
@@ -84,10 +88,10 @@ so the system is honest about what's measured vs estimated.
 
 Retained MQTT topics added:
 
-| Topic | Payload | Notes |
-|---|---|---|
-| `$SYS/broker/ntp/drift_ppm` | signed int as ASCII (e.g. `-35`) or empty bytes | empty payload distinguishes "unknown" from "0 ppm" |
-| `$SYS/broker/ntp/free_running_s` | non-negative int | 0 means within normal poll cycle |
+| Topic                            | Payload                                         | Notes                                              |
+| -------------------------------- | ----------------------------------------------- | -------------------------------------------------- |
+| `$SYS/broker/ntp/drift_ppm`      | signed int as ASCII (e.g. `-35`) or empty bytes | empty payload distinguishes "unknown" from "0 ppm" |
+| `$SYS/broker/ntp/free_running_s` | non-negative int                                | 0 means within normal poll cycle                   |
 
 ## Results on the live 0.7.2 device
 
@@ -158,11 +162,11 @@ docs/screenshots/        refreshed (version bump 0.7.1 -> 0.7.2,
 
 ## Binary size
 
-| Version | Size | Δ from prev |
-|---|---:|---:|
-| 0.7.0 | 1,146,592 B | — |
-| 0.7.1 | 1,149,712 B | +3,120 B (CSRF) |
-| 0.7.2 | 1,149,808 B | +96 B (drift comp) |
+| Version |        Size |        Δ from prev |
+| ------- | ----------: | -----------------: |
+| 0.7.0   | 1,146,592 B |                  — |
+| 0.7.1   | 1,149,712 B |    +3,120 B (CSRF) |
+| 0.7.2   | 1,149,808 B | +96 B (drift comp) |
 
 The drift code is tiny — most of it is comments. 73 % OTA slot still
 free.
@@ -190,15 +194,15 @@ free.
 CSRF (0.7.1) + drift comp (0.7.2) closes the "both pretty important"
 pair the user flagged. Remaining items from earlier plans:
 
-| Plan | Item | Status |
-|---|---|---|
-| plan-mqtt-ux-v2 | Phase 4 (CSRF) | ✅ 0.7.1 |
-| plan-ntp-server.md | Drift compensation | ✅ 0.7.2 |
-| plan-ntp-server.md | POST /api/time/set | not done — held |
-| plan-ntp-server.md | CONFIG_NTP_BROADCAST | not done — held |
-| plan-ntp-server.md | Real DHCP option 42 | not done — held (needs IDF patch) |
-| plan-tasmesh.md | Phase 0 (test harness) | not started |
-| plan-tasmesh.md | Phases 1-4 | not started |
+| Plan               | Item                   | Status                            |
+| ------------------ | ---------------------- | --------------------------------- |
+| plan-mqtt-ux-v2    | Phase 4 (CSRF)         | ✅ 0.7.1                          |
+| plan-ntp-server.md | Drift compensation     | ✅ 0.7.2                          |
+| plan-ntp-server.md | POST /api/time/set     | not done — held                   |
+| plan-ntp-server.md | CONFIG_NTP_BROADCAST   | not done — held                   |
+| plan-ntp-server.md | Real DHCP option 42    | not done — held (needs IDF patch) |
+| plan-tasmesh.md    | Phase 0 (test harness) | not started                       |
+| plan-tasmesh.md    | Phases 1-4             | not started                       |
 
 Next action open. CSRF + drift were the user's stated priorities and
 they're both done.

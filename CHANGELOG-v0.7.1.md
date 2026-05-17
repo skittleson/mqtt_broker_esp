@@ -18,13 +18,13 @@ this.
 
 ### Threat model
 
-| Vector | Pre-0.7.1 | Post-0.7.1 |
-|---|---|---|
-| Drive-by `<form>` POST from another origin | Triggers `/save-settings`, `/save`, OTA endpoints | Blocked: SameSite=Strict cookie not sent, no token in form |
-| `<img src=/reboot>` on any page | Reboots the device | Blocked: `/reboot` is POST now, GET returns 404 |
-| `<iframe>` + auto-submit form | Triggers anything | Blocked: same as above |
-| LAN-local XSS via reflected input | We have no reflected-input surface (all dynamic values go through textContent or server-side HTML escape) | Same; CSRF is an additional layer |
-| Direct curl with valid Basic Auth | Works (intentional) | Works after a 1-line CSRF token fetch (`make ota` and friends) |
+| Vector                                     | Pre-0.7.1                                                                                                 | Post-0.7.1                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Drive-by `<form>` POST from another origin | Triggers `/save-settings`, `/save`, OTA endpoints                                                         | Blocked: SameSite=Strict cookie not sent, no token in form     |
+| `<img src=/reboot>` on any page            | Reboots the device                                                                                        | Blocked: `/reboot` is POST now, GET returns 404                |
+| `<iframe>` + auto-submit form              | Triggers anything                                                                                         | Blocked: same as above                                         |
+| LAN-local XSS via reflected input          | We have no reflected-input surface (all dynamic values go through textContent or server-side HTML escape) | Same; CSRF is an additional layer                              |
+| Direct curl with valid Basic Auth          | Works (intentional)                                                                                       | Works after a 1-line CSRF token fetch (`make ota` and friends) |
 
 ### Implementation
 
@@ -52,7 +52,7 @@ bool           csrf_verify(const char *header_token,  // X-CSRF-Token
 2. `csrf=<hex>` urlencoded form field — for `<form method='POST'>`
    submits.
 3. `?csrf=<hex>` URL query parameter — used by the OTA multipart upload,
-   because hidden inputs in multipart bodies land *after* the file
+   because hidden inputs in multipart bodies land _after_ the file
    payload in browser serializers (forces us to buffer the entire
    upload before deciding to accept). Same security model, cleaner
    implementation.
@@ -65,28 +65,28 @@ for the trade-off.
 
 ### Endpoints protected (8)
 
-| Endpoint | Pre-0.7.1 | Post-0.7.1 |
-|---|---|---|
-| `POST /save-settings` | accepted | requires token |
-| `POST /save` (WiFi creds) | accepted | requires token |
-| `POST /api/time/resync` | accepted | requires token |
-| `POST /ota-rollback` | accepted | requires token |
-| `POST /ota-url` | accepted | requires token |
-| `POST /ota-upload` | accepted (multipart) | requires token in URL or header |
-| **`GET /reboot`** | rebooted the device | **`GET` returns 404**; only `POST /reboot` with token reboots |
-| New: `GET /api/csrf` | n/a | returns `{"token":"<hex>"}` (auth-gated; CLI helper) |
+| Endpoint                  | Pre-0.7.1            | Post-0.7.1                                                    |
+| ------------------------- | -------------------- | ------------------------------------------------------------- |
+| `POST /save-settings`     | accepted             | requires token                                                |
+| `POST /save` (WiFi creds) | accepted             | requires token                                                |
+| `POST /api/time/resync`   | accepted             | requires token                                                |
+| `POST /ota-rollback`      | accepted             | requires token                                                |
+| `POST /ota-url`           | accepted             | requires token                                                |
+| `POST /ota-upload`        | accepted (multipart) | requires token in URL or header                               |
+| **`GET /reboot`**         | rebooted the device  | **`GET` returns 404**; only `POST /reboot` with token reboots |
+| New: `GET /api/csrf`      | n/a                  | returns `{"token":"<hex>"}` (auth-gated; CLI helper)          |
 
 ### Endpoints intentionally NOT protected (4)
 
 These are read-only and intentionally open as documented in
 `plan-ntp-server.md` Phase 1 and the auth-exempt block in `portal.c`:
 
-| Endpoint | Why |
-|---|---|
-| `GET /api/ping` | Liveness probe; used by reboot-countdown polling. No secrets in response. |
-| `GET /api/time` | NTP state; no settings or secrets. Documented as open. |
-| `GET /api/csrf` | Returns the token itself — auth-gated so an attacker can't lift the token in one request, but no CSRF check (would be circular). |
-| All other `GET` HTML pages | They're the *source* of the token. |
+| Endpoint                   | Why                                                                                                                              |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/ping`            | Liveness probe; used by reboot-countdown polling. No secrets in response.                                                        |
+| `GET /api/time`            | NTP state; no settings or secrets. Documented as open.                                                                           |
+| `GET /api/csrf`            | Returns the token itself — auth-gated so an attacker can't lift the token in one request, but no CSRF check (would be circular). |
+| All other `GET` HTML pages | They're the _source_ of the token.                                                                                               |
 
 ### CLI ergonomics (`make ota`, `tools/capture_*.py`)
 
@@ -105,18 +105,18 @@ all via `make ota` with no manual intervention.
 
 10 new assertions in `test_broker.py` section 22 (`test_csrf`):
 
-| # | Test |
-|--:|---|
-| 1 | `/api/csrf` returns a well-formed 32-hex token |
-| 2 | `Set-Cookie: csrf=...; SameSite=Strict; Path=/` on every response |
-| 3 | POST `/api/time/resync` without token → 403 |
-| 4 | POST with wrong token → 403 |
-| 5 | POST with `X-CSRF-Token` header → 200 |
-| 6 | POST with `csrf=` form field → 200 |
-| 7 | `GET /reboot` → 404 (promoted to POST in 0.7.1) |
-| 8 | `POST /reboot` without token → 403 (device NOT rebooted) |
-| 9 | `/api/csrf` without auth → 401 (when `BROKER_AUTH` env set) |
-| (live OTA) | `make ota` end-to-end works through the CSRF gate |
+|          # | Test                                                              |
+| ---------: | ----------------------------------------------------------------- |
+|          1 | `/api/csrf` returns a well-formed 32-hex token                    |
+|          2 | `Set-Cookie: csrf=...; SameSite=Strict; Path=/` on every response |
+|          3 | POST `/api/time/resync` without token → 403                       |
+|          4 | POST with wrong token → 403                                       |
+|          5 | POST with `X-CSRF-Token` header → 200                             |
+|          6 | POST with `csrf=` form field → 200                                |
+|          7 | `GET /reboot` → 404 (promoted to POST in 0.7.1)                   |
+|          8 | `POST /reboot` without token → 403 (device NOT rebooted)          |
+|          9 | `/api/csrf` without auth → 401 (when `BROKER_AUTH` env set)       |
+| (live OTA) | `make ota` end-to-end works through the CSRF gate                 |
 
 Also fixed `test_firmware_version`'s semver regex to accept pre-release
 suffixes (`0.7.1-rc1` etc.).
@@ -159,24 +159,24 @@ docs/screenshots/        refreshed (footer version bump 0.7.0 -> 0.7.1)
 
 ## Binary size
 
-| Version | Size | Δ |
-|---|---:|---:|
-| 0.7.0 | 1,146,592 B | — |
-| 0.7.1 | 1,149,712 B | +3,120 B |
+| Version |        Size |        Δ |
+| ------- | ----------: | -------: |
+| 0.7.0   | 1,146,592 B |        — |
+| 0.7.1   | 1,149,712 B | +3,120 B |
 
 Comfortable: 73 % of 4 MB OTA slot still free.
 
 ## Plan-mqtt-ux-v2 scorecard — Phase 4 (CSRF)
 
-| # | Criterion | Status |
-|---|---|---|
-| 4.1 | CSRF token on every POST endpoint | ✅ all 6 protected + OTA upload + reboot |
-| 4.2 | Token rotates on reboot, in-RAM only | ✅ |
-| 4.3 | `Set-Cookie: SameSite=Strict` defense-in-depth | ✅ |
-| 4.4 | `/reboot` promoted from GET to POST | ✅ |
-| 4.5 | CLI tooling (`make ota`) works through CSRF | ✅ verified end-to-end |
-| 4.6 | Integration tests for CSRF | ✅ 10 assertions |
-| 4.7 | No regression in existing 115 broker + 13 NTP tests | ✅ all green |
+| #   | Criterion                                           | Status                                   |
+| --- | --------------------------------------------------- | ---------------------------------------- |
+| 4.1 | CSRF token on every POST endpoint                   | ✅ all 6 protected + OTA upload + reboot |
+| 4.2 | Token rotates on reboot, in-RAM only                | ✅                                       |
+| 4.3 | `Set-Cookie: SameSite=Strict` defense-in-depth      | ✅                                       |
+| 4.4 | `/reboot` promoted from GET to POST                 | ✅                                       |
+| 4.5 | CLI tooling (`make ota`) works through CSRF         | ✅ verified end-to-end                   |
+| 4.6 | Integration tests for CSRF                          | ✅ 10 assertions                         |
+| 4.7 | No regression in existing 115 broker + 13 NTP tests | ✅ all green                             |
 
 Phase 4 of plan-mqtt-ux-v2 is now done. With 0.7.0 (NTP) and 0.7.1
 (CSRF) shipped, all UX-plan and security-plan items are closed.
