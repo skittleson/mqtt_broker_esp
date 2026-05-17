@@ -31,10 +31,10 @@
 
 ## Project Status
 
-[![GitHub Issues](https://img.shields.io/github/issues/spencerkittleson/mqtt_broker_esp.svg)](https://github.com/spencerkittleson/mqtt_broker_esp/issues)
-[![GitHub Stars](https://img.shields.io/github/stars/spencerkittleson/mqtt_broker_esp.svg)](https://github.com/spencerkittleson/mqtt_broker_esp/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/spencerkittleson/mqtt_broker_esp.svg)](https://github.com/spencerkittleson/mqtt_broker_esp/network)
-[![License](https://img.shields.io/github/license/spencerkittleson/mqtt_broker_esp.svg)](https://github.com/spencerkittleson/mqtt_broker_esp/blob/main/LICENSE)
+[![GitHub Issues](https://img.shields.io/github/issues/skittleson/mqtt_broker_esp.svg)](https://github.com/skittleson/mqtt_broker_esp/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/skittleson/mqtt_broker_esp.svg)](https://github.com/skittleson/mqtt_broker_esp/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/skittleson/mqtt_broker_esp.svg)](https://github.com/skittleson/mqtt_broker_esp/network)
+[![License](https://img.shields.io/github/license/skittleson/mqtt_broker_esp.svg)](https://github.com/skittleson/mqtt_broker_esp/blob/main/LICENSE)
 
 ---
 
@@ -203,7 +203,7 @@ Every connected MQTT client is visible in the web portal with its client ID, IP 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/spencerkittleson/mqtt_broker_esp.git
+   git clone https://github.com/skittleson/mqtt_broker_esp.git
    cd mqtt_broker_esp
    ```
 
@@ -328,7 +328,7 @@ The broker is designed to work with the following hardware platforms:
 source $IDF_PATH/export.sh
 
 # Clone and build
-git clone https://github.com/spencerkittleson/mqtt_broker_esp.git
+git clone https://github.com/skittleson/mqtt_broker_esp.git
 cd mqtt_broker_esp
 idf.py build
 
@@ -744,7 +744,7 @@ The broker uses PSRAM for optimal performance with a configurable memory layout:
 
 ### Support
 
-If you're experiencing issues not covered here, please file an issue on the [GitHub repository](https://github.com/spencerkittleson/mqtt_broker_esp/issues) with detailed information about your setup and the problem.
+If you're experiencing issues not covered here, please file an issue on the [GitHub repository](https://github.com/skittleson/mqtt_broker_esp/issues) with detailed information about your setup and the problem.
 
 ## Architecture and Implementation
 
