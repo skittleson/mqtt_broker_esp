@@ -6,7 +6,7 @@
     No cloud. No server. Just plug it in.
     <br />
     <br />
-    <a href="#quick-start">Quick Start</a>
+    <a href="#quick-start-guide">Quick Start</a>
     &middot;
     <a href="#use-cases">Use Cases</a>
     &middot;
@@ -190,7 +190,7 @@ With NAPT enabled, you can still reach every device from your main network — o
 
 Every connected MQTT client is visible in the web portal with its client ID, IP address, connection duration, subscription count, and keep-alive interval. WiFi AP clients show MAC addresses and signal strength. The `/api/clients` JSON endpoint makes it easy to build dashboards, alerting, or inventory systems that track which devices are online and what they're doing.
 
-## Quick Start Guide
+## <a id="quick-start-guide"></a> Quick Start Guide
 
 ### Prerequisites
 
@@ -313,7 +313,7 @@ The broker is designed to work with the following hardware platforms:
 - Any ESP32-S3 development board with PSRAM
 - ESP32-S3 modules with sufficient memory
 
-## Quick Start Guide
+## <a id="quick-start-guide-2"></a> Quick Start Guide
 
 ### Prerequisites
 
