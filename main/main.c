@@ -10,6 +10,7 @@
 #include "portal.h"
 #include "ntp.h"
 #include "csrf.h"
+#include "timers.h"
 #include "led_strip.h"
 #include "mdns.h"
 
@@ -280,6 +281,13 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting SNTP client + server...");
     ntp_init();
     ntp_server_start();
+
+    /* Scheduled MQTT publishes (Tasmota-style timers).
+     * Must come after ntp_init() so the POSIX TZ env var is set; the
+     * scheduler still won't fire until time(NULL) >= 2023-01-01 anyway,
+     * but starting the task here lets the portal serve /timers immediately. */
+    ESP_LOGI(TAG, "Starting timer scheduler...");
+    timers_init();
 
     /* CSRF: random 16-byte per-boot token used by every state-changing
      * portal endpoint. Must initialise before the portal task starts

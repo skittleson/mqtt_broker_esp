@@ -73,6 +73,23 @@
 void broker_start(void);
 
 /**
+ * Inject a PUBLISH from a non-client source (scheduler, $SYS, future rules).
+ * Goes through normal retained-storage + fanout paths. Thread-safe; queues
+ * the request to broker_task and returns immediately.
+ *
+ * @param topic        topic string (NUL-terminated or topic_len bytes)
+ * @param topic_len    length of topic (must be > 0 and ≤ BROKER_TESTER_MAX_TOPIC_LEN)
+ * @param payload      payload bytes (may be NULL when payload_len == 0)
+ * @param payload_len  payload length (≤ BROKER_TESTER_MAX_PAYLOAD_LEN)
+ * @param qos          0 or 1 (QoS 2 not supported)
+ * @param retain       store as retained message
+ * @return true on enqueue, false on invalid args or full queue
+ */
+bool broker_publish_local(const char *topic, size_t topic_len,
+                          const uint8_t *payload, size_t payload_len,
+                          uint8_t qos, bool retain);
+
+/**
  * Get broker runtime statistics (thread-safe snapshot).
  */
 typedef struct {

@@ -20,6 +20,7 @@
 #include "ntp.h"
 #include "version.h"
 #include "csrf.h"
+#include "timers.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -234,6 +235,7 @@ typedef enum {
 typedef struct {
     http_method_t method;
     char path[128];
+    char query[128];      /* URL query string after '?' (empty if none) */
     char body[512];
     char auth_user[65];   /* decoded from Authorization: Basic header */
     char auth_pass[65];
@@ -303,7 +305,13 @@ static void http_parse(const uint8_t *data, size_t len, http_request_t *req)
     *space = '\0';
 
     char *qmark = strchr(path, '?');
-    if (qmark) *qmark = '\0';
+    if (qmark) {
+        *qmark = '\0';
+        strncpy(req->query, qmark + 1, sizeof(req->query) - 1);
+        req->query[sizeof(req->query) - 1] = '\0';
+    } else {
+        req->query[0] = '\0';
+    }
 
     strncpy(req->path, path, sizeof(req->path) - 1);
     req->path[sizeof(req->path) - 1] = '\0';
@@ -1447,6 +1455,7 @@ static void handle_http_client(int client_fd)
             "<a href='/settings' class='btn'>Configuration</a>"
             "<a href='/clients' class='btn'>Connected Clients</a>"
             "<a href='/tester' class='btn'>MQTT Tester</a>"
+            "<a href='/timers' class='btn'>Timers</a>"
             "<a href='/time' class='btn'>Time / NTP</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
@@ -1772,10 +1781,12 @@ static void handle_http_client(int client_fd)
             /* Server-enable mirror -- ntp_get_settings() doesn't expose
              * srv_enabled today; read it directly. Default ON per plan. */
             uint8_t srv_en = 1;
+            uint8_t accept_set = 0;  /* Phase 4: manual POST /api/time/set */
             {
                 nvs_handle_t snh;
                 if (nvs_open("ntp", NVS_READONLY, &snh) == ESP_OK) {
                     nvs_get_u8(snh, "srv_enabled", &srv_en);
+                    nvs_get_u8(snh, "accept_set", &accept_set);
                     nvs_close(snh);
                 }
             }
@@ -1824,12 +1835,26 @@ static void handle_http_client(int client_fd)
                 "<label>Poll interval (seconds, 64-86400)</label>"
                 "<input type='number' name='ntp_poll' value='%u' min='64' max='86400'>"
                 "<label>Timezone (POSIX TZ, e.g. UTC0 or PST8PDT,M3.2.0,M11.1.0)</label>"
-                "<input type='text' name='ntp_tz' value='%s' maxlength='63'>",
+                "<input type='text' name='ntp_tz' value='%s' maxlength='63'>"
+                /* Phase 4 of plan-ntp-server.md: opt-in manual time set.
+                 * Off by default. Wording is deliberately blunt --
+                 * operators who don't need it should never see the form
+                 * on /time, and operators who do need it should
+                 * understand the trust model they're stepping into. */
+                "<p style='margin-top:10px'><label style='font-weight:normal'>"
+                "<input type='checkbox' name='ntp_accept_set' value='1' %s> "
+                "Accept manual time set (POST /api/time/set)</label></p>"
+                "<p style='color:#ffcc80;font-size:0.8em;margin:-4px 0 0 24px'>"
+                "For air-gapped installs only. When on, an authenticated user "
+                "can set the clock from /time while no upstream is reachable. "
+                "Any real upstream sync immediately supersedes the manual value."
+                "</p>",
                 sync_summary, server_summary,
                 ns.enabled ? "checked" : "",
                 srv_en ? "checked" : "",
                 ns.upstreams[0], ns.upstreams[1], ns.upstreams[2],
-                (unsigned)ns.poll_s, ns.tz);
+                (unsigned)ns.poll_s, ns.tz,
+                accept_set ? "checked" : "");
         }
 
         /* The Save button triggers a reboot so changes apply uniformly
@@ -2002,6 +2027,12 @@ static void handle_http_client(int client_fd)
                 if (urldecode_param(req.body, "ntp_tz", val, sizeof(val))) {
                     nvs_set_str(nh, "tz", val[0] ? val : "UTC0");
                 }
+                /* Phase 4: accept_set toggle. Default OFF per the plan;
+                 * unchecked checkboxes don't appear in form bodies so
+                 * absence == 0. */
+                uint8_t accept_set = (strstr(req.body, "ntp_accept_set=1") != NULL) ? 1 : 0;
+                nvs_set_u8(nh, "accept_set", accept_set);
+                ESP_LOGI(TAG, "Saved NTP accept_set: %d", accept_set);
                 nvs_commit(nh);
                 nvs_close(nh);
             } else {
@@ -2609,6 +2640,66 @@ static void handle_http_client(int client_fd)
      * a few hundred ms later, so we report 'in-flight' if it hasn't
      * landed yet). Per the plan this is auth-gated; the regular Basic
      * Auth check above already enforces that. */
+    /* ============ NTP MANUAL SET (gated, opt-in) ============
+     * Phase 4 of plan-ntp-server.md. Body is either JSON ({"epoch_us":N}
+     * or {"epoch_s":N}) or form-encoded (epoch_us=N / epoch_s=N) so a
+     * curl one-liner or the /time form both work. Refused unless the
+     * operator has flipped `ntp.accept_set` on in /settings AND the
+     * device is currently unsynced -- ntp_manual_set() enforces both. */
+    } else if (strcmp(req.path, "/api/time/set") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
+        /* Extract epoch_us (preferred) or epoch_s (form convenience).
+         * We don't pull in a JSON parser for this; the body is small and
+         * the field name is unambiguous -- find it, skip ':' or '=',
+         * skip whitespace/quotes, strtoll. */
+        int64_t epoch_us = 0;
+        const char *b = req.body;
+        const char *p = strstr(b, "epoch_us");
+        if (p) {
+            p += strlen("epoch_us");
+            while (*p == ' ' || *p == ':' || *p == '=' || *p == '"' || *p == '\t') p++;
+            epoch_us = (int64_t)strtoll(p, NULL, 10);
+        } else if ((p = strstr(b, "epoch_s")) != NULL) {
+            p += strlen("epoch_s");
+            while (*p == ' ' || *p == ':' || *p == '=' || *p == '"' || *p == '\t') p++;
+            epoch_us = (int64_t)strtoll(p, NULL, 10) * 1000000LL;
+        }
+
+        ntp_manual_result_t r = ntp_manual_set(epoch_us);
+        const char *status_line;
+        const char *err_str;
+        switch (r) {
+            case NTP_MANUAL_OK:
+                status_line = "200 OK"; err_str = "ok"; break;
+            case NTP_MANUAL_DISABLED:
+                status_line = "403 Forbidden"; err_str = "disabled"; break;
+            case NTP_MANUAL_ALREADY_SYNCED:
+                status_line = "409 Conflict"; err_str = "already_synced"; break;
+            case NTP_MANUAL_BAD_EPOCH:
+            default:
+                status_line = "400 Bad Request"; err_str = "bad_epoch"; break;
+        }
+        /* Echo the accepted epoch so callers can confirm what landed --
+         * useful when the JSON parse went sideways and silently grabbed
+         * the wrong number. */
+        char *json = body;
+        int len = snprintf(json, PAGE_BUF_SIZE,
+            "{\"ok\":%s,\"status\":\"%s\",\"epoch_us\":%lld}",
+            (r == NTP_MANUAL_OK) ? "true" : "false",
+            err_str, (long long)epoch_us);
+        if (r == NTP_MANUAL_OK) {
+            ESP_LOGW(TAG, "Manual time set accepted: epoch_us=%lld",
+                     (long long)epoch_us);
+        } else {
+            ESP_LOGW(TAG, "Manual time set rejected (%s): epoch_us=%lld",
+                     err_str, (long long)epoch_us);
+        }
+        http_response_start(client_fd, status_line, "application/json", len);
+        http_send_body(client_fd, json, len);
+
     } else if (strcmp(req.path, "/api/time/resync") == 0 && req.method == REQ_POST) {
         if (!csrf_verify(req.csrf_header, req.body)) {
             http_send_csrf_403(client_fd);
@@ -2730,6 +2821,85 @@ static void handle_http_client(int client_fd)
             ".then(function(){setTimeout(function(){location.href='/time';},800);});"
             "return false;};</script>",
             csrf_token_hex(), csrf_token_hex());
+
+        /* ====== Manual time-set form (Phase 4 of plan-ntp-server.md) ======
+         * Only renders when (a) the operator has opted in via
+         * /settings -> Accept manual time set, AND (b) we are currently
+         * unsynced -- the same gates ntp_manual_set() enforces server
+         * side. Rendering the form when the server would refuse it would
+         * just be confusing. The browser-time button is the common path
+         * (one click, microsecond precision from Date.now()); the
+         * datetime-local input is a fallback for when the browsing
+         * device's own clock is wrong (e.g. tethered to the broker AP
+         * with no other reference). Both POST to /api/time/set with
+         * X-CSRF-Token; no JSON parser is required server-side. */
+        {
+            uint8_t accept_set = 0;
+            nvs_handle_t snh;
+            if (nvs_open("ntp", NVS_READONLY, &snh) == ESP_OK) {
+                nvs_get_u8(snh, "accept_set", &accept_set);
+                nvs_close(snh);
+            }
+            if (accept_set && !st.synced) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<fieldset><legend>&nbsp;Set time manually&nbsp;</legend>"
+                    "<p style='color:#ffcc80;font-size:0.85em;margin:0 0 8px 0'>"
+                    "No upstream reachable. Set the clock from this browser "
+                    "so retained-message timestamps and $SYS/broker/time "
+                    "start working. A real upstream sync will supersede this "
+                    "value automatically.</p>"
+                    "<button id='tsnow' type='button' class='btn' "
+                    "style='margin-bottom:8px'>Use this browser's clock</button>"
+                    "<p style='color:#aaa;font-size:0.8em;margin:4px 0'>"
+                    "\xe2\x80\x94 or pick a UTC moment \xe2\x80\x94</p>"
+                    "<input type='datetime-local' id='tsdt' step='1' "
+                    "style='width:100%%;margin-bottom:6px'>"
+                    "<button id='tsmanual' type='button' class='btn'>"
+                    "Set to entered time (UTC)</button>"
+                    "<p id='tsmsg' style='margin-top:8px;min-height:1.2em'></p>"
+                    "<script>"
+                    "function tsPost(us){"
+                    "var m=document.getElementById('tsmsg');"
+                    "m.textContent='Submitting\xe2\x80\xa6';m.style.color='#aaa';"
+                    "fetch('/api/time/set',{method:'POST',"
+                    "headers:{'X-CSRF-Token':'%s','Content-Type':'application/json'},"
+                    "body:JSON.stringify({epoch_us:us})})"
+                    ".then(function(r){return r.json().then(function(j){return{r:r,j:j};});})"
+                    ".then(function(o){if(o.r.ok){m.textContent='Accepted. Reloading\xe2\x80\xa6';"
+                    "m.style.color='#a5d6a7';setTimeout(function(){location.href='/time';},900);}"
+                    "else{m.textContent='Rejected: '+(o.j.status||o.r.status);"
+                    "m.style.color='#ff8888';}})"
+                    ".catch(function(e){m.textContent='Network error: '+e;m.style.color='#ff8888';});}"
+                    "document.getElementById('tsnow').onclick=function(){"
+                    "tsPost(Date.now()*1000);};"
+                    "document.getElementById('tsmanual').onclick=function(){"
+                    "var v=document.getElementById('tsdt').value;"
+                    "if(!v){document.getElementById('tsmsg').textContent='Enter a date/time first.';"
+                    "document.getElementById('tsmsg').style.color='#ff8888';return;}"
+                    "var ms=Date.parse(v+'Z');"
+                    "if(isNaN(ms)){document.getElementById('tsmsg').textContent='Could not parse.';"
+                    "document.getElementById('tsmsg').style.color='#ff8888';return;}"
+                    "tsPost(ms*1000);};"
+                    "</script>"
+                    /* <noscript> path: vanilla form posting epoch_s
+                     * from a hidden field the operator fills out
+                     * (rare; documented for completeness). */
+                    "<noscript><p style='color:#aaa;font-size:0.85em'>"
+                    "Without JavaScript: <code>curl -u user:pass "
+                    "-H 'X-CSRF-Token: %s' -d 'epoch_s=$(date +%%s)' "
+                    "http://&lt;device&gt;/api/time/set</code></p></noscript>"
+                    "</fieldset>",
+                    csrf_token_hex(), csrf_token_hex());
+            } else if (!st.synced) {
+                /* Hint discoverability when the operator has NOT opted in.
+                 * Tiny line, no form -- this is informational only. */
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<p style='color:#888;font-size:0.8em;text-align:center'>"
+                    "No upstream reachable. To allow manual time set from "
+                    "this page, enable it in <a href='/settings'>Settings "
+                    "\xe2\x86\x92 Time (NTP)</a>.</p>");
+            }
+        }
 
         /* Recent-clients table from the server's rate-limit LRU. Sorted
          * by last_us descending in-place (simple insertion sort -- max 32
@@ -2929,6 +3099,411 @@ static void handle_http_client(int client_fd)
             handle_ota_url(client_fd, url);
             return;  /* handle_ota_url closes client_fd */
         }
+
+    /* ============ /timers PAGES + API (scheduled MQTT publishes) ============
+     * Tasmota-style timer UI backed by main/timers.c. JSON wire format is
+     * documented in plan-scheduled-publishes.md §2/§2a. */
+    } else if (strcmp(req.path, "/timers") == 0 && req.method == REQ_GET) {
+        int pos = 0;
+
+        time_t now_utc = time(NULL);
+        bool clock_ok = now_utc >= 1700000000;
+        struct tm lt;
+        char now_str[40] = "clock not synced";
+        if (clock_ok) {
+            localtime_r(&now_utc, &lt);
+            strftime(now_str, sizeof(now_str), "%Y-%m-%d %H:%M:%S %Z", &lt);
+        }
+
+        if (!clock_ok) {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<div class='st warn'>Clock not synced — timers are paused. "
+                "<a href='/time' style='color:#fff;text-decoration:underline'>Check NTP</a></div>");
+        }
+
+        bool master = timers_master_enabled();
+        int armed = 0;
+        for (int i = 1; i <= TIMERS_SLOT_COUNT; i++) {
+            timer_slot_t t;
+            if (timers_get(i, &t) && t.arm) armed++;
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<fieldset><legend>&nbsp;Timers&nbsp;</legend>"
+            "<p style='margin:4px 0'>%d of %d armed \xc2\xb7 master <b>%s</b> \xc2\xb7 "
+            "local <code>%s</code></p>"
+            "<form method='POST' action='/timers/master' style='margin:6px 0'>"
+            "<input type='hidden' name='csrf' value='%s'>"
+            "<input type='hidden' name='enable' value='%d'>"
+            "<button type='submit' class='btn %s'>%s all timers</button>"
+            "</form>"
+            "<table><tr>"
+            "<th style='width:6%%'>#</th>"
+            "<th style='width:8%%'>On</th>"
+            "<th style='width:24%%'>Label</th>"
+            "<th style='width:14%%'>Time</th>"
+            "<th style='width:18%%'>Days</th>"
+            "<th style='width:30%%'>Topic</th>"
+            "</tr>",
+            armed, TIMERS_SLOT_COUNT,
+            master ? "enabled" : "PAUSED",
+            now_str,
+            csrf_token_hex(),
+            master ? 0 : 1,
+            master ? "bgry" : "bgrn",
+            master ? "Pause" : "Resume");
+
+        for (int i = 1; i <= TIMERS_SLOT_COUNT; i++) {
+            timer_slot_t t;
+            timers_get(i, &t);
+            char days_str[8] = "-------";
+            timers_days_to_string(t.days, days_str);
+            bool empty = !t.arm && t.topic[0] == '\0' && t.label[0] == '\0';
+            if (empty) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<tr style='color:#888'><td>%d</td><td>—</td>"
+                    "<td colspan='3'><a href='/timers/edit?n=%d'>(empty — configure)</a></td>"
+                    "<td>—</td></tr>",
+                    i, i);
+            } else {
+                char topic_short[40];
+                size_t tn = strnlen(t.topic, TIMERS_TOPIC_MAX);
+                if (tn > sizeof(topic_short) - 1) {
+                    memcpy(topic_short, t.topic, sizeof(topic_short) - 4);
+                    memcpy(topic_short + sizeof(topic_short) - 4, "...", 4);
+                } else {
+                    memcpy(topic_short, t.topic, tn);
+                    topic_short[tn] = '\0';
+                }
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<tr><td>%d</td><td>%s</td>"
+                    "<td><a href='/timers/edit?n=%d'>%s</a></td>"
+                    "<td>%02u:%02u%s</td>"
+                    "<td><code>%s</code></td>"
+                    "<td><code style='font-size:0.85em'>%s</code></td></tr>",
+                    i,
+                    t.arm ? "<span style='color:#a5d6a7'>●</span>"
+                          : "<span style='color:#888'>○</span>",
+                    i, t.label[0] ? t.label : "(unnamed)",
+                    (unsigned)(t.minute_of_day / 60),
+                    (unsigned)(t.minute_of_day % 60),
+                    t.repeat ? "" : " once",
+                    days_str,
+                    topic_short);
+            }
+            if (pos > PAGE_BUF_SIZE - 1024) break;  /* defensive */
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "</table>"
+            "<p style='color:#888;font-size:0.8em;text-align:center;margin:8px 0 0'>"
+            "Click a row to edit. Dropped fires: %u</p>"
+            "</fieldset>"
+            "<br><a href='/' class='btn'>Main Menu</a>",
+            (unsigned)timers_dropped_count());
+
+        http_send_page(client_fd, body, (size_t)pos);
+
+    } else if (strcmp(req.path, "/timers/edit") == 0 && req.method == REQ_GET) {
+        /* Parse ?n=<slot> from query string. */
+        int slot = 0;
+        const char *n_eq = strstr(req.query, "n=");
+        if (n_eq) slot = atoi(n_eq + 2);
+        if (slot < 1 || slot > TIMERS_SLOT_COUNT) {
+            http_send_plain(client_fd, "400 Bad Request", "slot out of range");
+            free(body); close(client_fd); return;
+        }
+        timer_slot_t t;
+        timers_get(slot, &t);
+        char days_str[8] = "SMTWTFS";
+        timers_days_to_string(t.days ? t.days : TIMERS_DAYS_ALL, days_str);
+
+        /* Pre-flight saved banner from ?saved=1 */
+        bool saved = (strstr(req.query, "saved=1") != NULL);
+        int pos = 0;
+        if (saved) {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<div class='st ok'>Saved.</div>");
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<fieldset><legend>&nbsp;Timer %d&nbsp;</legend>"
+            "<form method='POST' action='/timers/save'>"
+            "<input type='hidden' name='csrf' value='%s'>"
+            "<input type='hidden' name='n' value='%d'>"
+            "<label>Label</label>"
+            "<input type='text' name='label' maxlength='%d' value='%s'>"
+            "<p><label><input type='checkbox' name='arm' value='1'%s>Arm</label>"
+            "<label><input type='checkbox' name='repeat' value='1'%s>Repeat</label></p>"
+            "<label>Time (local, 24h)</label>"
+            "<input type='time' name='time' value='%02u:%02u' required>"
+            "<label>Window (± minutes random jitter, 0–15)</label>"
+            "<input type='number' name='window' min='0' max='15' value='%u'>"
+            "<label>Days</label>"
+            "<p style='text-align:left'>"
+            "<label style='display:inline;margin-right:8px'><input type='checkbox' name='d0' value='1'%s>Sun</label>"
+            "<label style='display:inline;margin-right:8px'><input type='checkbox' name='d1' value='1'%s>Mon</label>"
+            "<label style='display:inline;margin-right:8px'><input type='checkbox' name='d2' value='1'%s>Tue</label>"
+            "<label style='display:inline;margin-right:8px'><input type='checkbox' name='d3' value='1'%s>Wed</label>"
+            "<label style='display:inline;margin-right:8px'><input type='checkbox' name='d4' value='1'%s>Thu</label>"
+            "<label style='display:inline;margin-right:8px'><input type='checkbox' name='d5' value='1'%s>Fri</label>"
+            "<label style='display:inline'><input type='checkbox' name='d6' value='1'%s>Sat</label>"
+            "</p>"
+            "<p style='font-size:0.85em;margin:4px 0'>"
+            "<a href='/timers/edit?n=%d&preset=weekdays'>Weekdays</a> \xc2\xb7 "
+            "<a href='/timers/edit?n=%d&preset=weekends'>Weekends</a> \xc2\xb7 "
+            "<a href='/timers/edit?n=%d&preset=all'>Every day</a> \xc2\xb7 "
+            "<a href='/timers/edit?n=%d&preset=none'>Clear</a></p>",
+            slot,
+            csrf_token_hex(), slot,
+            TIMERS_LABEL_MAX, t.label,
+            t.arm ? " checked" : "",
+            t.repeat ? " checked" : "",
+            (unsigned)(t.minute_of_day / 60), (unsigned)(t.minute_of_day % 60),
+            (unsigned)t.window,
+            (t.days & TIMERS_DAY_SUN) ? " checked" : "",
+            (t.days & TIMERS_DAY_MON) ? " checked" : "",
+            (t.days & TIMERS_DAY_TUE) ? " checked" : "",
+            (t.days & TIMERS_DAY_WED) ? " checked" : "",
+            (t.days & TIMERS_DAY_THU) ? " checked" : "",
+            (t.days & TIMERS_DAY_FRI) ? " checked" : "",
+            (t.days & TIMERS_DAY_SAT) ? " checked" : "",
+            slot, slot, slot, slot);
+
+        /* Apply preset day mask via query string redirect-friendly UX:
+         * we just adjust the checkboxes inline via JS. (Server-side would
+         * require a follow-up redirect; keep this lightweight.) */
+        const char *preset = strstr(req.query, "preset=");
+        if (preset) {
+            preset += 7;
+            const char *script = NULL;
+            if (strncmp(preset, "weekdays", 8) == 0)
+                script = "var s=[0,0,1,1,1,1,1,0];";
+            else if (strncmp(preset, "weekends", 8) == 0)
+                script = "var s=[0,1,0,0,0,0,0,1];";
+            else if (strncmp(preset, "all", 3) == 0)
+                script = "var s=[0,1,1,1,1,1,1,1];";
+            else if (strncmp(preset, "none", 4) == 0)
+                script = "var s=[0,0,0,0,0,0,0,0];";
+            if (script) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<script>%s"
+                    "for(var i=0;i<7;i++){var e=document.getElementsByName('d'+i)[0];if(e)e.checked=!!s[i+1];}"
+                    "</script>", script);
+            }
+        }
+
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<hr style='border:0;border-top:1px solid #555;margin:12px 0'>"
+            "<label>Publish topic</label>"
+            "<input type='text' name='topic' maxlength='%d' value='%s' placeholder='home/lights/cmd'>"
+            "<label>Payload (≤ %d bytes, UTF-8)</label>"
+            "<input type='text' name='payload' maxlength='%d' value='%.*s' placeholder='ON'>"
+            "<p><label><input type='radio' name='qos' value='0'%s>QoS 0</label>"
+            "<label><input type='radio' name='qos' value='1'%s>QoS 1</label>"
+            "<label><input type='checkbox' name='retain' value='1'%s>Retain</label></p>"
+            "<button type='submit' class='btn bgrn'>Save</button>"
+            "</form>"
+            "<form method='POST' action='/timers/fire' style='margin-top:6px'>"
+            "<input type='hidden' name='csrf' value='%s'>"
+            "<input type='hidden' name='n' value='%d'>"
+            "<button type='submit' class='btn'>Test fire now</button>"
+            "</form>"
+            "<form method='POST' action='/timers/clear' style='margin-top:6px' "
+            "onsubmit=\"return confirm('Clear timer %d?')\">"
+            "<input type='hidden' name='csrf' value='%s'>"
+            "<input type='hidden' name='n' value='%d'>"
+            "<button type='submit' class='btn bred'>Clear slot</button>"
+            "</form>"
+            "</fieldset>"
+            "<a href='/timers' class='btn bgry'>Back</a>",
+            TIMERS_TOPIC_MAX, t.topic,
+            TIMERS_PAYLOAD_MAX,
+            TIMERS_PAYLOAD_MAX, (int)t.payload_len, t.payload,
+            (t.qos == 0) ? " checked" : "",
+            (t.qos == 1) ? " checked" : "",
+            t.retain ? " checked" : "",
+            csrf_token_hex(), slot,
+            slot, csrf_token_hex(), slot);
+
+        http_send_page(client_fd, body, (size_t)pos);
+
+    } else if (strcmp(req.path, "/timers/save") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
+        char val[300];
+        int slot = 0;
+        if (urldecode_param(req.body, "n", val, sizeof(val))) slot = atoi(val);
+        if (slot < 1 || slot > TIMERS_SLOT_COUNT) {
+            http_send_plain(client_fd, "400 Bad Request", "bad slot");
+            free(body); close(client_fd); return;
+        }
+        timer_slot_t t;
+        memset(&t, 0, sizeof(t));
+        t.arm    = (strstr(req.body, "arm=1") != NULL);
+        t.repeat = (strstr(req.body, "repeat=1") != NULL);
+        t.retain = (strstr(req.body, "retain=1") != NULL);
+        if (urldecode_param(req.body, "qos", val, sizeof(val))) {
+            int q = atoi(val); if (q == 0 || q == 1) t.qos = (uint8_t)q;
+        }
+        if (urldecode_param(req.body, "window", val, sizeof(val))) {
+            int w = atoi(val);
+            if (w >= 0 && w <= 15) t.window = (uint8_t)w;
+        }
+        if (urldecode_param(req.body, "time", val, sizeof(val))) {
+            unsigned hh = 0, mm = 0;
+            if (sscanf(val, "%u:%u", &hh, &mm) == 2 && hh < 24 && mm < 60) {
+                t.minute_of_day = (uint16_t)(hh * 60 + mm);
+            }
+        }
+        for (int d = 0; d < 7; d++) {
+            char key[4]; snprintf(key, sizeof(key), "d%d", d);
+            char dv[8] = "";
+            urldecode_param(req.body, key, dv, sizeof(dv));
+            if (dv[0] == '1') t.days |= (uint8_t)(1u << d);
+        }
+        if (urldecode_param(req.body, "topic", val, sizeof(val))) {
+            strncpy(t.topic, val, TIMERS_TOPIC_MAX);
+            t.topic[TIMERS_TOPIC_MAX] = '\0';
+        }
+        if (urldecode_param(req.body, "payload", val, sizeof(val))) {
+            size_t pl = strnlen(val, TIMERS_PAYLOAD_MAX);
+            memcpy(t.payload, val, pl);
+            t.payload[pl] = '\0';
+            t.payload_len = (uint16_t)pl;
+        }
+        if (urldecode_param(req.body, "label", val, sizeof(val))) {
+            strncpy(t.label, val, TIMERS_LABEL_MAX);
+            t.label[TIMERS_LABEL_MAX] = '\0';
+        }
+        char err[80] = "";
+        esp_err_t setr = timers_set(slot, &t, err, sizeof(err));
+        if (setr != ESP_OK) {
+            int len = snprintf(body, PAGE_BUF_SIZE,
+                "<fieldset><legend>&nbsp;Error&nbsp;</legend>"
+                "<p style='color:#ff8888'>%s</p>"
+                "<a href='/timers/edit?n=%d' class='btn'>Back</a></fieldset>",
+                err[0] ? err : "validation failed", slot);
+            http_send_page(client_fd, body, (size_t)len);
+            free(body); close(client_fd); return;
+        }
+        /* 302 back to /timers */
+        char loc[64];
+        snprintf(loc, sizeof(loc), "/timers/edit?n=%d&saved=1", slot);
+        int hlen = snprintf(body, PAGE_BUF_SIZE,
+            "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n", loc);
+        send(client_fd, body, (size_t)hlen, 0);
+        free(body); close(client_fd); return;
+
+    } else if (strcmp(req.path, "/timers/clear") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
+        char val[16];
+        int slot = 0;
+        if (urldecode_param(req.body, "n", val, sizeof(val))) slot = atoi(val);
+        if (slot < 1 || slot > TIMERS_SLOT_COUNT) {
+            http_send_plain(client_fd, "400 Bad Request", "bad slot");
+            free(body); close(client_fd); return;
+        }
+        timers_clear(slot);
+        int hlen = snprintf(body, PAGE_BUF_SIZE,
+            "HTTP/1.1 302 Found\r\nLocation: /timers\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n");
+        send(client_fd, body, (size_t)hlen, 0);
+        free(body); close(client_fd); return;
+
+    } else if (strcmp(req.path, "/timers/master") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
+        char val[8] = "";
+        urldecode_param(req.body, "enable", val, sizeof(val));
+        timers_set_master_enabled(val[0] == '1');
+        int hlen = snprintf(body, PAGE_BUF_SIZE,
+            "HTTP/1.1 302 Found\r\nLocation: /timers\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n");
+        send(client_fd, body, (size_t)hlen, 0);
+        free(body); close(client_fd); return;
+
+    } else if (strcmp(req.path, "/timers/fire") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
+        char val[16];
+        int slot = 0;
+        if (urldecode_param(req.body, "n", val, sizeof(val))) slot = atoi(val);
+        esp_err_t fr = timers_fire_now(slot);
+        const char *loc = (fr == ESP_OK) ? "/timers?fired=1" : "/timers?fired=0";
+        char redir_loc[64];
+        snprintf(redir_loc, sizeof(redir_loc),
+                 (fr == ESP_OK) ? "/timers/edit?n=%d&saved=1" : "/timers/edit?n=%d",
+                 slot);
+        if (slot >= 1 && slot <= TIMERS_SLOT_COUNT) loc = redir_loc;
+        int hlen = snprintf(body, PAGE_BUF_SIZE,
+            "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n", loc);
+        send(client_fd, body, (size_t)hlen, 0);
+        free(body); close(client_fd); return;
+
+    } else if (strcmp(req.path, "/api/timers") == 0 && req.method == REQ_GET) {
+        int pos = 0;
+        time_t now_utc = time(NULL);
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "{\"schema\":1,\"master\":%s,\"now_unix\":%lld,\"dropped\":%u,\"timers\":[",
+            timers_master_enabled() ? "true" : "false",
+            (long long)now_utc, (unsigned)timers_dropped_count());
+        for (int i = 1; i <= TIMERS_SLOT_COUNT; i++) {
+            timer_slot_t t;
+            timers_get(i, &t);
+            char days_str[8];
+            timers_days_to_string(t.days, days_str);
+            int64_t nx = timers_next_fire_unix(i);
+            if (i > 1 && pos < (int)PAGE_BUF_SIZE - 4) body[pos++] = ',';
+            /* Inline JSON-escape macro for topic/label/payload. Handles
+             * ", \, and control chars (validator already rejects most). */
+            #define ESC_TO(src, srclen) do { \
+                if (pos + 1 < PAGE_BUF_SIZE) body[pos++] = '"'; \
+                for (size_t _i = 0; _i < (size_t)(srclen); _i++) { \
+                    if (pos + 6 >= PAGE_BUF_SIZE) break; \
+                    unsigned char _c = (unsigned char)(src)[_i]; \
+                    if (_c == '"')       { body[pos++] = '\\'; body[pos++] = '"'; } \
+                    else if (_c == '\\') { body[pos++] = '\\'; body[pos++] = '\\'; } \
+                    else if (_c < 0x20)  { pos += snprintf(body+pos, PAGE_BUF_SIZE-pos, "\\u%04x", _c); } \
+                    else                 { body[pos++] = (char)_c; } \
+                } \
+                if (pos + 1 < PAGE_BUF_SIZE) body[pos++] = '"'; \
+            } while (0)
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "{\"n\":%d,\"arm\":%s,\"repeat\":%s,\"retain\":%s,\"qos\":%u,"
+                "\"window\":%u,\"time\":\"%02u:%02u\",\"days\":\"%s\","
+                "\"topic\":",
+                i,
+                t.arm ? "true" : "false",
+                t.repeat ? "true" : "false",
+                t.retain ? "true" : "false",
+                (unsigned)t.qos,
+                (unsigned)t.window,
+                (unsigned)(t.minute_of_day / 60),
+                (unsigned)(t.minute_of_day % 60),
+                days_str);
+            ESC_TO(t.topic, strnlen(t.topic, TIMERS_TOPIC_MAX));
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, ",\"label\":");
+            ESC_TO(t.label, strnlen(t.label, TIMERS_LABEL_MAX));
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, ",\"payload\":");
+            ESC_TO(t.payload, t.payload_len);
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                ",\"payload_len\":%u,\"next_fire_unix\":%lld}",
+                (unsigned)t.payload_len, (long long)nx);
+            #undef ESC_TO
+            if (pos > PAGE_BUF_SIZE - 512) break;
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "]}");
+        http_response_start(client_fd, "200 OK", "application/json", (size_t)pos);
+        http_send_body(client_fd, body, (size_t)pos);
 
     /* ============ 404 ============ */
     } else {

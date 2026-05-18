@@ -2,6 +2,17 @@
 
 Detailed per-release notes live in [`changelog/`](changelog/).
 
+## 0.8.0 — Scheduled MQTT publishes
+
+Tasmota-style timer scheduling. 16 wall-clock slots fire MQTT publishes at
+configured local times on selected days of the week. New `/timers` portal
+page, `/api/timers` JSON, and `broker_publish_local()` API for non-client
+publishes. DST handled automatically via the POSIX TZ string in NVS —
+user-editable so the device stays correct across rule changes for 10+ years
+without reflash. Per-slot QoS 0/1, retain, ±0–15 min window jitter, repeat
+or one-shot. Master pause toggle. Test-fire button per slot.
+Details: [`changelog/CHANGELOG-v0.8.0.md`](changelog/CHANGELOG-v0.8.0.md).
+
 ## 0.7.0 — NTP support
 
 LAN-local time source. Built-in SNTP client (`esp_sntp`, up to 3 upstreams) and

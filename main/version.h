@@ -6,17 +6,20 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-/* 0.7.2: NTP drift compensation while free-running.
- * 8-slot ring of (mono_us, wall_us) sync pairs, linear ppm fit over
- * the longest baseline. Applied to SNTP server tx_timestamp and
- * $SYS/broker/time only when free-running > 2*poll. Plan target:
- * 24h drift 2s -> 200ms. New: $SYS/broker/ntp/drift_ppm and
- * /free_running_s retained topics, drift_ppm + free_running_s in
- * /api/time, drift suffix on /time page server status line. */
+/* 0.8.0: Scheduled MQTT publishes (Tasmota-style "Timers").
+ * 16 wall-clock slots stored in NVS "mqtt_cfg"/"timers" as a compact JSON
+ * blob (schema v=1). 1Hz scheduler task fires through the existing
+ * thread-safe publish queue via new broker_publish_local() API. Honours
+ * the POSIX TZ string from "ntp"/"tz" so DST transitions are automatic;
+ * spring-forward gaps skip cleanly, fall-back is deduped by the
+ * per-slot last-fire-UTC-minute cache. New portal pages /timers and
+ * /timers/edit, JSON /api/timers, master pause toggle, per-slot test-fire.
+ * No fires until time(NULL) >= 2023-01-01 (SNTP synced). 10-year
+ * lifetime preserved: zone rules live in user-editable NVS, not code. */
 #define FW_VERSION_MAJOR  0
-#define FW_VERSION_MINOR  7
-#define FW_VERSION_PATCH  2
-#define FW_VERSION        "0.7.2"
+#define FW_VERSION_MINOR  8
+#define FW_VERSION_PATCH  0
+#define FW_VERSION        "0.8.0"
 #define FW_NAME           "mqtt_broker"
 
 #endif /* VERSION_H */

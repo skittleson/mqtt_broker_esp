@@ -151,6 +151,7 @@ typedef struct {
     uint8_t  payload[BROKER_TESTER_MAX_PAYLOAD_LEN];
     uint16_t payload_len;
     bool     retain;
+    uint8_t  qos;        /* 0 or 1; tester always sets 0, scheduler may set 1 */
 } tester_pub_req_t;
 
 static tester_consumer_t  s_tester_consumers[BROKER_TESTER_MAX_CONSUMERS];
@@ -222,14 +223,17 @@ int broker_tester_consumer_count(void)
     return n;
 }
 
-bool broker_tester_request_publish(const char *topic, size_t topic_len,
+/* Internal: enqueue a publish request with explicit QoS. Used by both the
+ * tester WS path (qos=0) and the timer scheduler (qos=0 or 1). */
+static bool broker_enqueue_publish(const char *topic, size_t topic_len,
                                    const uint8_t *payload, size_t payload_len,
-                                   bool retain)
+                                   uint8_t qos, bool retain)
 {
     if (!s_tester_inited || !s_tester_pub_q) return false;
     if (!topic || topic_len == 0 || topic_len > BROKER_TESTER_MAX_TOPIC_LEN) return false;
     if (payload_len > BROKER_TESTER_MAX_PAYLOAD_LEN) return false;
     if (payload_len > 0 && !payload) return false;
+    if (qos > 1) return false;
     /* Reject wildcards and embedded NULs in publish topics (MQTT 3.1.1 §3.3.2.1). */
     for (size_t i = 0; i < topic_len; i++) {
         char c = topic[i];
@@ -244,6 +248,7 @@ bool broker_tester_request_publish(const char *topic, size_t topic_len,
     if (payload_len > 0) memcpy(req.payload, payload, payload_len);
     req.payload_len = (uint16_t)payload_len;
     req.retain = retain;
+    req.qos = qos;
 
     if (xQueueSend(s_tester_pub_q, &req, 0) != pdTRUE) {
         portENTER_CRITICAL(&s_tester_mux);
@@ -252,6 +257,28 @@ bool broker_tester_request_publish(const char *topic, size_t topic_len,
         return false;
     }
     return true;
+}
+
+bool broker_tester_request_publish(const char *topic, size_t topic_len,
+                                   const uint8_t *payload, size_t payload_len,
+                                   bool retain)
+{
+    return broker_enqueue_publish(topic, topic_len, payload, payload_len,
+                                  /*qos=*/0, retain);
+}
+
+/* Public API exposed in mqtt_broker.h. Wraps the same queue used by the
+ * tester so we don't grow a second producer path. Leading '$' is rejected
+ * here too — the scheduler must never publish into the broker's
+ * reserved $SYS/ namespace (MQTT 3.1.1 §4.7.2). */
+bool broker_publish_local(const char *topic, size_t topic_len,
+                          const uint8_t *payload, size_t payload_len,
+                          uint8_t qos, bool retain)
+{
+    if (!topic || topic_len == 0) return false;
+    if (topic[0] == '$') return false;
+    return broker_enqueue_publish(topic, topic_len, payload, payload_len,
+                                  qos, retain);
 }
 
 void broker_tester_get_stats(broker_tester_stats_t *out)
@@ -339,8 +366,21 @@ static void tester_drain_publish_queue(void)
         portEXIT_CRITICAL(&s_tester_mux);
         handle_publish_internal(req.topic, req.topic_len,
                                 req.payload, req.payload_len, req.retain,
-                                /*pub_qos=*/0);
+                                req.qos);
     }
+}
+
+#else /* !BROKER_TESTER_ENABLED */
+
+/* Stub when tester is compiled out: scheduler still compiles, but every
+ * scheduled publish silently fails. timers.c logs this on first failure. */
+bool broker_publish_local(const char *topic, size_t topic_len,
+                          const uint8_t *payload, size_t payload_len,
+                          uint8_t qos, bool retain)
+{
+    (void)topic; (void)topic_len; (void)payload; (void)payload_len;
+    (void)qos; (void)retain;
+    return false;
 }
 
 #endif /* BROKER_TESTER_ENABLED */
