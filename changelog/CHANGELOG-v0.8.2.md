@@ -22,12 +22,12 @@ the JSON API.
   POSIX `<input>`. Falls back gracefully without JS (the dropdown is
   inert but the text input still works).
 - Helper line under the field: `POSIX TZ string. Picking a preset above
-  fills this field. Examples: UTC0, PST8PDT,M3.2.0,M11.1.0, <+0530>-5:30
-  (India).`
+fills this field. Examples: UTC0, PST8PDT,M3.2.0,M11.1.0, <+0530>-5:30
+(India).`
 
 **This is the 10-year-lifetime fix the plan was designed around.** When
 a government changes DST rules, an operator can either pick the updated
-preset from a newer firmware *or* hand-type the new POSIX string into
+preset from a newer firmware _or_ hand-type the new POSIX string into
 the same field with no firmware update at all. Rules live in
 user-editable NVS, not code.
 
@@ -39,7 +39,7 @@ user-editable NVS, not code.
   makes scanning easy. Pure CSS media query — no JS. The same
   `data-label`-driven pattern can be reused on `/clients` later.
 - **Master pause is now an inline pill** in the header line (`1 of 16
-  armed · [master: enabled] · local …`), not a full-width button.
+armed · [master: enabled] · local …`), not a full-width button.
   Two-color: green `enabled` / red `paused`. Click toggles the
   state via the existing `/timers/master` form.
 - **Save / Test fire / Clear slot buttons share a flex row** on

@@ -23,7 +23,8 @@ No cloud. No Pi. No Docker. Plug it in.
 Most MQTT setups need a Raspberry Pi, a cloud account, or a Linux box running
 Mosquitto. This puts the **entire broker on an ESP32-S3**: 100 concurrent
 clients, QoS 0/1, retained messages, OTA updates, a Tasmota-style web portal,
-and an SNTP server — all on an 8 MB chip you can power from a USB battery.
+**scheduled publishes (Tasmota-style timers)**, and an SNTP server — all on
+an 8 MB chip you can power from a USB battery.
 
 Built for home automation, IoT sensor fleets, and edge deployments that need a
 local broker with zero maintenance.
@@ -50,6 +51,20 @@ mosquitto_sub -h mqtt_broker.local -t "test/#" -v &
 mosquitto_pub -h mqtt_broker.local -t "test/hello" -m "world"
 ```
 
+Schedule a Tasmota-style publish without leaving the broker:
+
+```bash
+# Set your timezone on /settings first (dropdown of ~40 presets)
+curl -u user:pass http://mqtt_broker.local/settings   # → Time (NTP) → pick a preset
+
+# Then arm slot 1 to publish at 17:00 every weekday
+TOKEN=$(curl -s -u user:pass http://mqtt_broker.local/api/csrf | jq -r .token)
+curl -u user:pass -H "X-CSRF-Token: $TOKEN" -H 'Content-Type: application/json' \
+     -X PUT http://mqtt_broker.local/api/timers/1 \
+     -d '{"a":1,"r":1,"hm":1020,"d":"-MTWTF-","tp":"cmnd/tasmotas/POWER","pl":"ON","l":"lights on"}'
+# → {"saved":true,"n":1,"next_fire_unix":...}
+```
+
 ## Features
 
 - **Full MQTT 3.1.1** — CONNECT, SUBSCRIBE, PUBLISH, PUBACK, UNSUBSCRIBE, PINGREQ, DISCONNECT
@@ -59,8 +74,9 @@ mosquitto_pub -h mqtt_broker.local -t "test/hello" -m "world"
 - **Wildcards** — `+`, `#`, and `$SYS` topic protection per spec §4.7
 - **Authentication** — optional MQTT username/password + Basic Auth on the portal
 - **Web portal** — Tasmota-style dark UI: dashboard, live `/clients`, settings, OTA, firmware rollback
+- **Scheduled publishes** — 16 Tasmota-style timer slots (Arm / Repeat / HH:MM local / day mask / window jitter / publish topic+payload+QoS+retain). DST-aware via POSIX TZ (preset dropdown for ~40 common zones). Persists in NVS. Per-slot test-fire and master pause.
 - **OTA updates** — file upload, URL fetch, dual partitions, manual rollback button
-- **Built-in NTP** — SNTP client + SNTPv4 server on UDP :123, mDNS `_ntp._udp` advertisement, <±50 ms drift
+- **Built-in NTP** — SNTP client + SNTPv4 server on UDP :123, mDNS `_ntp._udp` advertisement, <±50 ms drift, drift compensation while free-running
 - **Ethernet gateway mode** (optional) — W5500 SPI + NAPT to bridge an isolated IoT WiFi to your LAN
 - **mDNS** — reachable as `<hostname>.local`, advertises `_mqtt._tcp`, `_http._tcp`, `_ntp._udp`
 - **WS2812 status LED** — visual boot/connect/run/AP state
@@ -70,6 +86,7 @@ mosquitto_pub -h mqtt_broker.local -t "test/hello" -m "world"
 <summary>Use cases</summary>
 
 - **Home automation hub** — local MQTT for Zigbee/Z-Wave bridges, ESPHome, Home Assistant
+- **Scheduling without a hub** — "lights on at 17:00 weekdays" publishes `cmnd/tasmotas/POWER=ON` directly from the broker; no Node-RED, no Home Assistant, no cron job on a Pi
 - **Mobile / field** — USB battery + ESP32 = portable MQTT infra for trade shows, ag, testing
 - **Network isolation** — Ethernet build bridges a 2.4 GHz IoT WiFi to your LAN with togglable NAPT
 - **Client tracking** — `/api/clients` exposes every connected device for dashboards/alerts
@@ -96,15 +113,16 @@ needed for [Ethernet gateway mode](docs/architecture.md#ethernet-gateway-w5500).
 <p align="center">
   <img src="docs/screenshots/clients.png" alt="Live clients page" width="380">
   &nbsp;
-  <img src="docs/screenshots/settings.png" alt="Settings page" width="380">
+  <img src="docs/screenshots/timers/list_desktop.png" alt="Timers list with master pill + 3-state On indicator + Rep column" width="380">
 </p>
 
 - **`/`** — dashboard with WiFi/broker stats, MQTT auth state, device info
 - **`/clients`** — live MQTT clients (ID, IP, uptime, subs, in-flight, published, keepalive) + WiFi AP clients (MAC, RSSI). Polls `/api/clients` every 3 s, pause button, tab-hidden backoff
-- **`/settings`** — broker port, auth, buffer size, retain, AP credentials, hostname, NAPT, NTP. **Save & Reboot** with confirm dialog and countdown page
+- **`/timers`** — 16 scheduled-publish slots. List view shows armed state (● / ◐ / —), repeat icon, time, day mask, topic. Edit form has Tasmota-parity fields (Arm / Repeat / Time / Window / Days / Topic / Payload / QoS / Retain) plus a live `Next fire: today at 17:00 (in 4h 12m)` line. Master pause pill in the header. Mobile collapses to stacked cards below 600 px
+- **`/settings`** — broker port, auth, buffer size, retain, AP credentials, hostname, NAPT, NTP, **timezone dropdown** (~40 IANA presets + free-form POSIX TZ). **Save & Reboot** with confirm dialog and countdown page
 - **`/update`** — file upload, URL fetch, rollback button showing the other partition's version
 - **`/time`** — live clock, NTP client+server status, recent SNTP clients, force-resync
-- **JSON API** — `/api/status`, `/api/clients`, `/api/time`, `/api/ping` (open, for liveness)
+- **JSON API** — `/api/status`, `/api/clients`, `/api/time`, `/api/timers` (GET list, PUT/DELETE per slot — CSRF-protected), `/api/ping` (open, for liveness)
 
 Full endpoint and JSON reference: [`docs/api.md`](docs/api.md).
 
@@ -123,7 +141,9 @@ All settings persist to NVS and survive reboots.
 | AP IP             | `192.168.25.1`             | Also compile-time                                    |
 | Hostname          | `mqtt_broker`              | DHCP + mDNS (`<hostname>.local`)                     |
 | NAPT              | on                         | Ethernet builds only, toggles live                   |
-| NTP client/server | on / on                    | Up to 3 upstreams, configurable poll interval and TZ |
+| NTP client/server | on / on                    | Up to 3 upstreams, configurable poll interval        |
+| Timezone          | `UTC0`                     | POSIX TZ string (preset dropdown + free-form input); DST handled by `localtime_r` |
+| Timers            | _(empty)_                  | 16 slots in NVS “mqtt_cfg”/“timers”, JSON blob (schema `v=1`) |
 
 Compile-time tunables (max clients, in-flight slots, retry timing, LED GPIO,
 SPI pins, …) live in `main/mqtt_broker.h`, `main/Kconfig.projbuild`, and
@@ -184,6 +204,8 @@ discovery, anti-amplification, and rate-limit drops.
 
 - [`docs/architecture.md`](docs/architecture.md) — tasks, cores, memory layout, flash partitions, QoS internals, Ethernet/NAPT, LED states, network modes, scaling past 100 clients
 - [`docs/api.md`](docs/api.md) — all HTTP endpoints, JSON schemas, `$SYS` topics, curl examples
+- [`plan-scheduled-publishes.md`](plan-scheduled-publishes.md) — timers design, DST/TZ correctness analysis, 10-year-lifetime rationale
+- [`docs/timers-ux-audit-v0.8.0.md`](docs/timers-ux-audit-v0.8.0.md) — portal UX audit methodology, baseline screenshots, fix sequencing
 - [`docs/portal-latency-analysis.md`](docs/portal-latency-analysis.md) — measurements behind the 0.6.6 latency work
 - [`docs/qos-persistence-plan.md`](docs/qos-persistence-plan.md) — roadmap for persistent sessions
 - [`CHANGELOG.md`](CHANGELOG.md) — per-release notes (full text under [`changelog/`](changelog/))
@@ -193,9 +215,11 @@ discovery, anti-amplification, and rate-limit drops.
 - QoS 2
 - Persistent sessions in PSRAM (no per-message flash writes — 10-year device-life goal)
 - TLS / certificate auth
-- Drift compensation while free-running
-- Manual `POST /api/time/set` for air-gapped installs
+- Sunrise/sunset modes on timers (needs lat/lon settings first)
+- `cmnd/<host>/Timer<n>` Tasmota MQTT command bridge (configure timers from Tasmoadmin etc.)
+- Mobile card layout pattern applied to `/clients`
 - Bootloader auto-rollback with an in-app self-test
+- Auto-regenerate `tz_presets.c` from current IANA tzdata in CI
 
 ## Contributing
 
