@@ -515,10 +515,11 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
     pos += snprintf(BPOS, BREM,
         "</div></fieldset>"
         "<script>"
-        /* Slot editor toggle */
+        /* Slot editor toggle — use computed style so CSS-hidden elements open correctly */
         "function btoggle(n){"
         "var el=document.getElementById('sed'+n);"
-        "el.style.display=el.style.display===''?'none':'';"
+        "var shown=window.getComputedStyle(el).display!=='none';"
+        "el.style.display=shown?'none':'block';"
         "}"
         "function bclose(n){"
         "document.getElementById('sed'+n).style.display='none';"
