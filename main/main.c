@@ -11,6 +11,7 @@
 #include "ntp.h"
 #include "csrf.h"
 #include "timers.h"
+#include "berry_runtime.h"
 #include "led_strip.h"
 #include "mdns.h"
 
@@ -296,6 +297,15 @@ void app_main(void)
      * here because the HTTP listener won't see traffic until the network
      * is up, which happens after this call returns. */
     csrf_init();
+
+    /* Berry scripting runtime (plan-berry-scripting.md, Phase 1).
+     * Starts after the broker so the future `mqtt` module can post into
+     * the existing tester publish queue, and after NTP so scripts that
+     * read time() at boot get a sensible value. */
+    ESP_LOGI(TAG, "Starting Berry runtime...");
+    if (!berry_init()) {
+        ESP_LOGW(TAG, "berry_init failed; continuing without scripting");
+    }
 
     ESP_LOGI(TAG, "=== ESP32 MQTT Broker ready ===");
 }

@@ -23,6 +23,7 @@
 #include "mqtt_broker.h"
 #include "mqtt_parser.h"
 #include "ntp.h"  /* ntp_is_synced(), ntp_now_us() for $SYS/broker/time */
+#include "berry_runtime.h"  /* berry_publish_topic_event(), berry_has_topic_subs() */
 
 #include <string.h>
 #include <errno.h>
@@ -1134,6 +1135,12 @@ static void handle_publish_internal(const char *topic, uint16_t topic_len,
      * fails in a way that affects real-client delivery. */
     tester_fanout(topic, topic_len, payload, payload_len, retain);
 #endif
+
+    /* Berry topic event hook (P3): non-blocking, drops when queue full.
+     * berry_has_topic_subs() is a single atomic load — cheap when idle. */
+    if (berry_has_topic_subs()) {
+        berry_publish_topic_event(topic, topic_len, payload, payload_len);
+    }
 }
 
 static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)
