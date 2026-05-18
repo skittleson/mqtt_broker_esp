@@ -271,7 +271,7 @@ void portal_berry_handle_post_stream(int client_fd,
         /* HTML checkboxes POST "on" when checked, absent when unchecked. */
         bool enabled = (en_str[0] != '\0');
         bool ok = berry_slot_save(slot,
-                                  label[0] ? label : NULL, strlen(label),
+                                  label, strlen(label),
                                   script, script_len, enabled);
         free(script);
         free(body);
@@ -433,6 +433,10 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
             "<span style='font-size:0.8em;color:#666'>%u B</span>"
             "<div class='slot-btns'>"
             "<button type='button' onclick='btoggle(%d)'>Edit</button>"
+            "<button type='button' onclick='btrash(%d)' "
+            "title='Clear this slot' "
+            "style='background:#3a1a1a;color:#ff8a80;border-color:#5a2020' "
+            "%s>&#x1F5D1;</button>"
             "</div>"
             "</div>"
             "<div class='seditor' id='sed%d'>"
@@ -463,6 +467,8 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
             label[0] ? label : "(empty)",
             (unsigned)sl.script_len,
             s, /* onclick btoggle arg */
+            s, /* onclick btrash arg */
+            sl.script_len == 0 && !label[0] ? "disabled" : "", /* trash disabled when already empty */
             s, /* sed%d id */
             s, /* form action slot number */
             csrf_token,
@@ -523,6 +529,27 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
         "}"
         "function bclose(n){"
         "document.getElementById('sed'+n).style.display='none';"
+        "}"
+        /* Trash: clear a slot by POSTing empty name+script (disabled, no enabled field) */
+        "function btrash(n){"
+        "if(!confirm('Clear slot '+n+'? This removes the name and script.'))return;"
+        "fetch('/api/csrf',{cache:'no-store'})"
+        ".then(function(r){return r.json();})"
+        ".then(function(d){"
+        "var b=new URLSearchParams();"
+        "b.append('csrf',d.token||'');"
+        "b.append('name','');"
+        "b.append('script','');"
+        /* no 'enabled' field → disabled */
+        "return fetch('/berry/slot/'+n+'/save',{"
+        "method:'POST',"
+        "headers:{'Content-Type':'application/x-www-form-urlencoded',"
+        "'X-CSRF-Token':d.token||''},"
+        "body:b.toString()"
+        "});"
+        "})"
+        ".then(function(){location.reload();})"
+        ".catch(function(e){alert('Clear failed: '+e);});"
         "}"
         /* Log auto-poll */
         "(function(){"
