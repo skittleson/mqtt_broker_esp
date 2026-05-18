@@ -2,6 +2,18 @@
 
 Detailed per-release notes live in [`changelog/`](changelog/).
 
+## 0.8.1 — /timers UX fixes
+
+Close every correctness defect from the 0.8.0 UX audit plus four higher-impact
+polish items. Numeric TZ offset on `/timers` (no more lying "UTC" label on a
+PDT device); dropped the "24h" claim on the time input (browsers honour
+locale); empty slot's edit form no longer pre-fills a misleading `12:00 AM`.
+Dedicated `Rep` column with ↻ / 1× icons; three-state On indicator (● armed
+/ ◐ disarmed / — empty); **`Next fire` line under the time picker** so users
+can sanity-check their schedule against the device's TZ in-context; trimmed
+footer noise. No protocol or storage changes. +1.2 KB binary.
+Details: [`changelog/CHANGELOG-v0.8.1.md`](changelog/CHANGELOG-v0.8.1.md).
+
 ## 0.8.0 — Scheduled MQTT publishes
 
 Tasmota-style timer scheduling. 16 wall-clock slots fire MQTT publishes at

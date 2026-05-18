@@ -225,6 +225,80 @@ static int hostname_is_valid(const char *s)
     return 1;
 }
 
+/* ---- /timers helpers (P0/P1 0.8.1 UX fixes) ----
+ *
+ * Format "YYYY-MM-DD HH:MM:SS (UTC±HH:MM)" using the device's POSIX TZ.
+ * Uses strftime's %z (-0700) and rewrites it as (UTC-07:00). Numeric
+ * offset is unambiguous regardless of the TZ name (`UTC7`, `PST8PDT`,
+ * `<+0530>-5:30`, ...). Writes "clock not synced" when SNTP is dark.
+ */
+static void portal_format_local_time(time_t now_utc, char *out, size_t out_size)
+{
+    if (now_utc < 1700000000) {
+        snprintf(out, out_size, "clock not synced");
+        return;
+    }
+    struct tm lt;
+    localtime_r(&now_utc, &lt);
+    char ts[32], offz[8];
+    strftime(ts,   sizeof(ts),   "%Y-%m-%d %H:%M:%S", &lt);
+    strftime(offz, sizeof(offz), "%z", &lt);
+    /* offz is "+HHMM" or "-HHMM". Convert to "+HH:MM" or fall back to
+     * a plain numeric offset if strftime didn't yield 5 chars. */
+    if (strlen(offz) == 5) {
+        snprintf(out, out_size, "%s (UTC%c%c%c:%c%c)",
+                 ts, offz[0], offz[1], offz[2], offz[3], offz[4]);
+    } else {
+        snprintf(out, out_size, "%s (UTC)", ts);
+    }
+}
+
+/* Render "next_fire_unix" as a human relative + absolute local line for
+ * the edit page. `slot_1based` is the slot we're editing. Writes "Not
+ * scheduled" when next_fire_unix == 0 (disarmed / no days / clock dark).
+ */
+static void portal_format_next_fire(int slot_1based, char *out, size_t out_size)
+{
+    int64_t nx = timers_next_fire_unix(slot_1based);
+    if (nx <= 0) {
+        snprintf(out, out_size, "Not scheduled");
+        return;
+    }
+    time_t now = time(NULL);
+    int64_t delta = nx - (int64_t)now;
+    if (delta < 0) delta = 0;
+    int days = (int)(delta / 86400);
+    int hours = (int)((delta % 86400) / 3600);
+    int mins  = (int)((delta % 3600) / 60);
+
+    struct tm lt;
+    time_t nxt = (time_t)nx;
+    localtime_r(&nxt, &lt);
+    char hhmm[8], offz[8];
+    strftime(hhmm, sizeof(hhmm), "%H:%M", &lt);
+    strftime(offz, sizeof(offz), "%z",    &lt);
+
+    /* "today", "tomorrow", else day-of-week + date. */
+    struct tm now_lt;
+    localtime_r(&now, &now_lt);
+    int dyd = lt.tm_yday - now_lt.tm_yday;
+    /* Year wrap when computing on Dec 31 → Jan 1 etc. */
+    if (lt.tm_year != now_lt.tm_year) dyd = 2;
+    const char *day_label;
+    char buf[24];
+    if (dyd == 0) day_label = "today";
+    else if (dyd == 1) day_label = "tomorrow";
+    else { strftime(buf, sizeof(buf), "%a %b %-d", &lt); day_label = buf; }
+
+    /* Relative "in 5h 12m" / "in 3d 2h". */
+    char rel[24];
+    if (days >= 1) snprintf(rel, sizeof(rel), "in %dd %dh", days, hours);
+    else if (hours >= 1) snprintf(rel, sizeof(rel), "in %dh %dm", hours, mins);
+    else snprintf(rel, sizeof(rel), "in %dm", mins);
+
+    snprintf(out, out_size, "%s at %s (%s)", day_label, hhmm, rel);
+}
+
 /* ---- HTTP Request Parser ---- */
 
 typedef enum {
@@ -3108,12 +3182,8 @@ static void handle_http_client(int client_fd)
 
         time_t now_utc = time(NULL);
         bool clock_ok = now_utc >= 1700000000;
-        struct tm lt;
-        char now_str[40] = "clock not synced";
-        if (clock_ok) {
-            localtime_r(&now_utc, &lt);
-            strftime(now_str, sizeof(now_str), "%Y-%m-%d %H:%M:%S %Z", &lt);
-        }
+        char now_str[64];
+        portal_format_local_time(now_utc, now_str, sizeof(now_str));
 
         if (!clock_ok) {
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
@@ -3137,12 +3207,13 @@ static void handle_http_client(int client_fd)
             "<button type='submit' class='btn %s'>%s all timers</button>"
             "</form>"
             "<table><tr>"
-            "<th style='width:6%%'>#</th>"
-            "<th style='width:8%%'>On</th>"
+            "<th style='width:5%%'>#</th>"
+            "<th style='width:7%%' title='● armed \xc2\xb7 ◐ disarmed \xc2\xb7 — empty'>On</th>"
             "<th style='width:24%%'>Label</th>"
-            "<th style='width:14%%'>Time</th>"
-            "<th style='width:18%%'>Days</th>"
-            "<th style='width:30%%'>Topic</th>"
+            "<th style='width:10%%'>Time</th>"
+            "<th style='width:6%%' title='↻ repeats \xc2\xb7 1× once'>Rep</th>"
+            "<th style='width:16%%'>Days</th>"
+            "<th style='width:32%%'>Topic</th>"
             "</tr>",
             armed, TIMERS_SLOT_COUNT,
             master ? "enabled" : "PAUSED",
@@ -3159,9 +3230,10 @@ static void handle_http_client(int client_fd)
             timers_days_to_string(t.days, days_str);
             bool empty = !t.arm && t.topic[0] == '\0' && t.label[0] == '\0';
             if (empty) {
+                /* P1 #5: — (grey) = empty slot. */
                 pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                     "<tr style='color:#888'><td>%d</td><td>—</td>"
-                    "<td colspan='3'><a href='/timers/edit?n=%d'>(empty — configure)</a></td>"
+                    "<td colspan='4'><a href='/timers/edit?n=%d'>(empty — configure)</a></td>"
                     "<td>—</td></tr>",
                     i, i);
             } else {
@@ -3174,31 +3246,46 @@ static void handle_http_client(int client_fd)
                     memcpy(topic_short, t.topic, tn);
                     topic_short[tn] = '\0';
                 }
+                /* P1 #5: three states for the On indicator.
+                 *   ● green  = armed (will fire)
+                 *   ◐ orange = configured but disarmed (won't fire)
+                 *   — grey    = empty (handled in the branch above)
+                 * P1 #4: "Rep" is its own column — ↻ for repeating, 1× for once. */
+                const char *on_html = t.arm
+                    ? "<span style='color:#a5d6a7' title='armed'>●</span>"
+                    : "<span style='color:#ffcc80' title='configured but disarmed'>◐</span>";
+                const char *rep_html = t.repeat
+                    ? "<span title='repeats'>↻</span>"
+                    : "<span style='color:#aaa' title='fires once then disarms'>1×</span>";
                 pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                     "<tr><td>%d</td><td>%s</td>"
                     "<td><a href='/timers/edit?n=%d'>%s</a></td>"
-                    "<td>%02u:%02u%s</td>"
+                    "<td>%02u:%02u</td>"
+                    "<td>%s</td>"
                     "<td><code>%s</code></td>"
                     "<td><code style='font-size:0.85em'>%s</code></td></tr>",
-                    i,
-                    t.arm ? "<span style='color:#a5d6a7'>●</span>"
-                          : "<span style='color:#888'>○</span>",
+                    i, on_html,
                     i, t.label[0] ? t.label : "(unnamed)",
                     (unsigned)(t.minute_of_day / 60),
                     (unsigned)(t.minute_of_day % 60),
-                    t.repeat ? "" : " once",
+                    rep_html,
                     days_str,
                     topic_short);
             }
             if (pos > PAGE_BUF_SIZE - 1024) break;  /* defensive */
         }
+        /* P1 #8: drop "Click a row to edit" filler; show "N dropped fires"
+         * only when N > 0 — zero is the boring case and noise. */
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table>");
+        uint32_t dropped = timers_dropped_count();
+        if (dropped > 0) {
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "<p style='color:#ffcc80;font-size:0.8em;text-align:center;margin:8px 0 0'>"
+                "%u dropped fire(s) since boot</p>", (unsigned)dropped);
+        }
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-            "</table>"
-            "<p style='color:#888;font-size:0.8em;text-align:center;margin:8px 0 0'>"
-            "Click a row to edit. Dropped fires: %u</p>"
             "</fieldset>"
-            "<br><a href='/' class='btn'>Main Menu</a>",
-            (unsigned)timers_dropped_count());
+            "<br><a href='/' class='btn'>Main Menu</a>");
 
         http_send_page(client_fd, body, (size_t)pos);
 
@@ -3216,6 +3303,29 @@ static void handle_http_client(int client_fd)
         char days_str[8] = "SMTWTFS";
         timers_days_to_string(t.days ? t.days : TIMERS_DAYS_ALL, days_str);
 
+        /* P0 #3: empty slot → render time <input> with no value so the
+         * browser shows it empty rather than a misleading "12:00 AM"
+         * default. "Truly empty" = no label, no topic, no arm, midnight
+         * minute_of_day — exactly the cleared state. Once the user fills
+         * any field we render value= normally on subsequent loads. */
+        bool slot_empty = (!t.arm && t.topic[0] == '\0' &&
+                           t.label[0] == '\0' && t.minute_of_day == 0);
+        char time_attr[40];
+        if (slot_empty) {
+            snprintf(time_attr, sizeof(time_attr), "required");
+        } else {
+            snprintf(time_attr, sizeof(time_attr), "value='%02u:%02u' required",
+                     (unsigned)(t.minute_of_day / 60),
+                     (unsigned)(t.minute_of_day % 60));
+        }
+
+        /* P1 #9: compute the human-readable next-fire string so the
+         * user can sanity-check their schedule in context. Reflects
+         * the device's POSIX TZ — catches misconfigured zones before
+         * the user discovers the problem at the scheduled time. */
+        char next_fire_str[64] = "";
+        portal_format_next_fire(slot, next_fire_str, sizeof(next_fire_str));
+
         /* Pre-flight saved banner from ?saved=1 */
         bool saved = (strstr(req.query, "saved=1") != NULL);
         int pos = 0;
@@ -3232,8 +3342,13 @@ static void handle_http_client(int client_fd)
             "<input type='text' name='label' maxlength='%d' value='%s'>"
             "<p><label><input type='checkbox' name='arm' value='1'%s>Arm</label>"
             "<label><input type='checkbox' name='repeat' value='1'%s>Repeat</label></p>"
-            "<label>Time (local, 24h)</label>"
-            "<input type='time' name='time' value='%02u:%02u' required>"
+            /* P0 #2: dropped "24h" claim — <input type='time'> renders
+             * AM/PM in US locales regardless of what the label says.
+             * POST still carries 24h "HH:MM". */
+            "<label>Time (local)</label>"
+            "<input type='time' name='time' %s>"
+            "<p style='color:#aaa;font-size:0.85em;margin:4px 0 8px'>"
+            "Next fire: <b>%s</b></p>"
             "<label>Window (± minutes random jitter, 0–15)</label>"
             "<input type='number' name='window' min='0' max='15' value='%u'>"
             "<label>Days</label>"
@@ -3256,7 +3371,7 @@ static void handle_http_client(int client_fd)
             TIMERS_LABEL_MAX, t.label,
             t.arm ? " checked" : "",
             t.repeat ? " checked" : "",
-            (unsigned)(t.minute_of_day / 60), (unsigned)(t.minute_of_day % 60),
+            time_attr, next_fire_str,
             (unsigned)t.window,
             (t.days & TIMERS_DAY_SUN) ? " checked" : "",
             (t.days & TIMERS_DAY_MON) ? " checked" : "",
