@@ -25,10 +25,21 @@
  * "Next fire" line under the time picker so users can sanity-check their
  * schedule against the device's TZ before leaving the form; trimmed the
  * footer (zero-dropped is the boring case). No flash penalty > 1 KB. */
+/* 0.8.2: Timezone preset dropdown + remaining /timers UX polish + JSON
+ * API completion. New tz_presets.c table (~40 common zones, IANA-derived)
+ * powers a <select> on /settings; picking copies the POSIX TZ string into
+ * the underlying text field (which remains the source of truth). The
+ * /timers list switches to a stacked card layout below 600 px via a CSS
+ * media query (no JS). Master pause is an inline pill in the header
+ * (replaces the full-width button). Save / Test fire / Clear share a flex
+ * row on desktop ≥ 600 px via HTML5 form='timer-save'. New write half of
+ * the JSON API: PUT /api/timers/<n> (slot JSON → timers_set + validation)
+ * and DELETE /api/timers/<n> (timers_clear). CSRF-protected, returns
+ * next_fire_unix in the saved response. */
 #define FW_VERSION_MAJOR  0
 #define FW_VERSION_MINOR  8
-#define FW_VERSION_PATCH  1
-#define FW_VERSION        "0.8.1"
+#define FW_VERSION_PATCH  2
+#define FW_VERSION        "0.8.2"
 #define FW_NAME           "mqtt_broker"
 
 #endif /* VERSION_H */

@@ -2,6 +2,23 @@
 
 Detailed per-release notes live in [`changelog/`](changelog/).
 
+## 0.8.2 — Timezone preset dropdown + /timers polish + JSON write API
+
+Headline: **the Timezone field on `/settings` is now a dropdown of ~40
+IANA-derived presets**, so picking 'US — Pacific (PT, DST)' writes the
+full `PST8PDT,M3.2.0,M11.1.0` POSIX string for you. The text input remains
+the source of truth — exotic zones still hand-type. Closes the 10-year-
+lifetime story: DST rules live in user-editable NVS, not code.
+
+Also ships the rest of the /timers UX audit follow-ups: mobile **card
+layout** below 600 px (no JS, pure CSS media query); master pause is now
+an inline pill in the header instead of a banner-style button; Save /
+Test fire / Clear share a flex row on desktop via HTML5 form= association.
+
+Write half of the JSON API lands: `PUT /api/timers/<n>` (validates,
+returns next_fire_unix) and `DELETE /api/timers/<n>`. Both CSRF-protected.
++5 KB binary. Details: [`changelog/CHANGELOG-v0.8.2.md`](changelog/CHANGELOG-v0.8.2.md).
+
 ## 0.8.1 — /timers UX fixes
 
 Close every correctness defect from the 0.8.0 UX audit plus four higher-impact

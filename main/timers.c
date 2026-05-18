@@ -874,3 +874,15 @@ esp_err_t timers_init(void)
     ESP_LOGI(TAG, "scheduler started (1Hz, %d slots)", TIMERS_SLOT_COUNT);
     return ESP_OK;
 }
+
+/* ===================================================================== */
+/* Public JSON-slot parser (forwards to the internal one)                */
+/* ===================================================================== */
+
+esp_err_t timers_parse_slot_json(const char *json, timer_slot_t *out)
+{
+    if (!json || !out) return ESP_ERR_INVALID_ARG;
+    const char *p = json;
+    if (parse_slot_object(&p, out) < 0) return ESP_ERR_INVALID_ARG;
+    return ESP_OK;
+}

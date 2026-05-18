@@ -104,4 +104,14 @@ void timers_days_to_string(uint8_t mask, char out[8]);
 esp_err_t timers_validate(const timer_slot_t *in,
                           char *err_out, size_t err_out_size);
 
+/* Parse a single slot JSON object into `*out` (zero-initialized first).
+ * Accepts both compact wire keys (`a`, `r`, `rt`, `q`, `w`, `hm`, `d`,
+ * `tp`, `pl`, `l`) and long-form (`arm`, `repeat`, `retain`, `qos`,
+ * `window`, `min`, `days`, `topic`, `payload`, `label`). Returns ESP_OK
+ * on parseable JSON, ESP_ERR_INVALID_ARG on malformed input.
+ *
+ * Does NOT validate the result's semantics; callers should follow with
+ * timers_set() (which validates internally) or timers_validate(). */
+esp_err_t timers_parse_slot_json(const char *json, timer_slot_t *out);
+
 #endif /* TIMERS_H */

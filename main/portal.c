@@ -21,6 +21,7 @@
 #include "version.h"
 #include "csrf.h"
 #include "timers.h"
+#include "tz_presets.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -303,7 +304,9 @@ static void portal_format_next_fire(int slot_1based, char *out, size_t out_size)
 
 typedef enum {
     REQ_GET,
-    REQ_POST
+    REQ_POST,
+    REQ_PUT,
+    REQ_DELETE
 } http_method_t;
 
 typedef struct {
@@ -367,6 +370,10 @@ static void http_parse(const uint8_t *data, size_t len, http_request_t *req)
 
     if (strncmp(line, "GET", 3) == 0) {
         req->method = REQ_GET;
+    } else if (strncmp(line, "DELETE", 6) == 0) {
+        req->method = REQ_DELETE;
+    } else if (strncmp(line, "PUT", 3) == 0) {
+        req->method = REQ_PUT;
     } else if (strncmp(line, "POST", 4) == 0) {
         req->method = REQ_POST;
     } else {
@@ -391,7 +398,7 @@ static void http_parse(const uint8_t *data, size_t len, http_request_t *req)
     req->path[sizeof(req->path) - 1] = '\0';
 
     char *body_start = strstr(space + 1, "\r\n\r\n");
-    if (body_start && req->method == REQ_POST) {
+    if (body_start && (req->method == REQ_POST || req->method == REQ_PUT)) {
         body_start += 4;
         size_t body_len = strlen(body_start);
         if (body_len > sizeof(req->body) - 1) {
@@ -1292,7 +1299,10 @@ static void handle_http_client(int client_fd)
     free(buf);  /* done with recv buffer */
 
     /* Now we have a parsed request -- update access-log identifiers. */
-    req_method = (req.method == REQ_GET) ? "GET" : "POST";
+    req_method = (req.method == REQ_GET)    ? "GET"
+                : (req.method == REQ_POST)   ? "POST"
+                : (req.method == REQ_PUT)    ? "PUT"
+                : (req.method == REQ_DELETE) ? "DELETE" : "?";
     req_path = req.path[0] ? req.path : "/";
 
     /* Allocate a shared page-body buffer on the heap */
@@ -1908,8 +1918,51 @@ static void handle_http_client(int client_fd)
                 "<input type='text' name='ntp_up2' value='%s' maxlength='63'>"
                 "<label>Poll interval (seconds, 64-86400)</label>"
                 "<input type='number' name='ntp_poll' value='%u' min='64' max='86400'>"
-                "<label>Timezone (POSIX TZ, e.g. UTC0 or PST8PDT,M3.2.0,M11.1.0)</label>"
-                "<input type='text' name='ntp_tz' value='%s' maxlength='63'>"
+                /* TZ field: a <select> dropdown of common presets + the
+                 * underlying POSIX TZ text input. Picking a preset copies
+                 * its value into the text field via a tiny inline handler;
+                 * the text field remains the single source of truth that
+                 * POSTs and persists. Users with exotic zones still hand-
+                 * type. Presets table lives in main/tz_presets.c. */
+                "<label>Timezone</label>"
+                "<select id='tz_preset' style='width:100%%;box-sizing:border-box;"
+                "background:#1f1f1f;color:#eaeaea;border:1px solid #555;"
+                "border-radius:0.3rem;padding:8px'>"
+                "<option value=''>— Pick a preset, or hand-type below —</option>",
+                sync_summary, server_summary,
+                ns.enabled ? "checked" : "",
+                srv_en ? "checked" : "",
+                ns.upstreams[0], ns.upstreams[1], ns.upstreams[2],
+                (unsigned)ns.poll_s);
+            for (size_t k = 0; k < TZ_PRESETS_COUNT; k++) {
+                bool selected = (strcmp(TZ_PRESETS[k].posix, ns.tz) == 0);
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<option value='%s'%s>%s</option>",
+                    TZ_PRESETS[k].posix,
+                    selected ? " selected" : "",
+                    TZ_PRESETS[k].label);
+            }
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "</select>"
+                "<input type='text' id='ntp_tz' name='ntp_tz' value='%s' "
+                "maxlength='63' placeholder='UTC0' "
+                "style='margin-top:6px;font-family:monospace'>"
+                "<p style='color:#888;font-size:0.8em;margin:2px 0 0'>"
+                "POSIX TZ string. Picking a preset above fills this field."
+                " Examples: <code>UTC0</code>, <code>PST8PDT,M3.2.0,M11.1.0</code>,"
+                " <code>&lt;+0530&gt;-5:30</code> (India).</p>"
+                /* Wire dropdown -> text field. Plain JS so it works
+                 * without any framework; the change handler copies the
+                 * selected POSIX string into the text input the form
+                 * actually submits. If JS is disabled the dropdown is
+                 * inert but the text field still works. */
+                "<script>"
+                "(function(){var s=document.getElementById('tz_preset'),"
+                "t=document.getElementById('ntp_tz');"
+                "if(!s||!t)return;"
+                "s.addEventListener('change',function(){if(s.value)t.value=s.value;});"
+                "})();"
+                "</script>"
                 /* Phase 4 of plan-ntp-server.md: opt-in manual time set.
                  * Off by default. Wording is deliberately blunt --
                  * operators who don't need it should never see the form
@@ -1923,11 +1976,7 @@ static void handle_http_client(int client_fd)
                 "can set the clock from /time while no upstream is reachable. "
                 "Any real upstream sync immediately supersedes the manual value."
                 "</p>",
-                sync_summary, server_summary,
-                ns.enabled ? "checked" : "",
-                srv_en ? "checked" : "",
-                ns.upstreams[0], ns.upstreams[1], ns.upstreams[2],
-                (unsigned)ns.poll_s, ns.tz,
+                ns.tz,
                 accept_set ? "checked" : "");
         }
 
@@ -3197,16 +3246,51 @@ static void handle_http_client(int client_fd)
             timer_slot_t t;
             if (timers_get(i, &t) && t.arm) armed++;
         }
+        /* 0.8.2 P1 #6 + #7:
+         * - Master pause is now an inline clickable pill in the header line,
+         *   not a full-width button. Posts to /timers/master via a tiny
+         *   <form> wrapped around the pill text.
+         * - Below 600px viewport, the 7-column table becomes a card layout:
+         *   each row is a stacked block with column labels rendered via
+         *   ::before. No JS — pure media query, fallback degrades to the
+         *   regular table on browsers that ignore the media block. The
+         *   .tg-* classes are scoped to this page so they don't bleed into
+         *   the rest of the portal. */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<style>"
+            /* Override the portal-wide `button{width:100%;line-height:2.4rem;
+             * font-size:1.2rem}` defaults so the master pill stays inline. */
+            ".tmaster{display:inline-block !important;width:auto !important;"
+            "padding:2px 10px !important;border-radius:12px;font-size:0.85em "
+            "!important;line-height:1.6 !important;cursor:pointer;border:0;"
+            "font-family:inherit}"
+            ".tmaster.on{background:#1b5e20;color:#a5d6a7}"
+            ".tmaster.off{background:#7a2222;color:#ffb0b0}"
+            ".tmaster.on:hover{background:#256528;color:#fff}"
+            ".tmaster.off:hover{background:#a02828;color:#fff}"
+            ".tmaster form{display:inline;margin:0}"
+            "table.tg th,table.tg td{padding:4px 6px;text-align:left;vertical-align:top}"
+            "@media (max-width:600px){"
+            "table.tg thead{display:none}"
+            "table.tg tr{display:block;border-bottom:1px solid #444;padding:6px 0}"
+            "table.tg tr:last-child{border-bottom:0}"
+            "table.tg td{display:block;padding:2px 0;border:0;width:auto !important}"
+            "table.tg td::before{content:attr(data-label) ': ';color:#888;"
+            "font-size:0.8em;margin-right:6px}"
+            "table.tg td.tg-hdr::before{content:''}"
+            "table.tg td.tg-hdr{font-weight:bold;font-size:1.05em;color:#1fa3ec}"
+            "}"
+            "</style>"
             "<fieldset><legend>&nbsp;Timers&nbsp;</legend>"
-            "<p style='margin:4px 0'>%d of %d armed \xc2\xb7 master <b>%s</b> \xc2\xb7 "
-            "local <code>%s</code></p>"
-            "<form method='POST' action='/timers/master' style='margin:6px 0'>"
+            "<p style='margin:4px 0'>%d of %d armed \xc2\xb7 "
+            "<form method='POST' action='/timers/master' style='display:inline;margin:0'>"
             "<input type='hidden' name='csrf' value='%s'>"
             "<input type='hidden' name='enable' value='%d'>"
-            "<button type='submit' class='btn %s'>%s all timers</button>"
+            "<button type='submit' class='tmaster %s' title='Click to %s all timers'>"
+            "master: %s</button>"
             "</form>"
-            "<table><tr>"
+            " \xc2\xb7 local <code>%s</code></p>"
+            "<table class='tg'><thead><tr>"
             "<th style='width:5%%'>#</th>"
             "<th style='width:7%%' title='● armed \xc2\xb7 ◐ disarmed \xc2\xb7 — empty'>On</th>"
             "<th style='width:24%%'>Label</th>"
@@ -3214,14 +3298,14 @@ static void handle_http_client(int client_fd)
             "<th style='width:6%%' title='↻ repeats \xc2\xb7 1× once'>Rep</th>"
             "<th style='width:16%%'>Days</th>"
             "<th style='width:32%%'>Topic</th>"
-            "</tr>",
+            "</tr></thead><tbody>",
             armed, TIMERS_SLOT_COUNT,
-            master ? "enabled" : "PAUSED",
-            now_str,
             csrf_token_hex(),
             master ? 0 : 1,
-            master ? "bgry" : "bgrn",
-            master ? "Pause" : "Resume");
+            master ? "on" : "off",
+            master ? "pause" : "resume",
+            master ? "enabled" : "PAUSED",
+            now_str);
 
         for (int i = 1; i <= TIMERS_SLOT_COUNT; i++) {
             timer_slot_t t;
@@ -3230,11 +3314,16 @@ static void handle_http_client(int client_fd)
             timers_days_to_string(t.days, days_str);
             bool empty = !t.arm && t.topic[0] == '\0' && t.label[0] == '\0';
             if (empty) {
-                /* P1 #5: — (grey) = empty slot. */
+                /* P1 #5: — (grey) = empty slot. Card-layout note: at
+                 * < 600px the colspan stops mattering; data-label drives
+                 * the per-cell label rendering instead. */
                 pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                    "<tr style='color:#888'><td>%d</td><td>—</td>"
-                    "<td colspan='4'><a href='/timers/edit?n=%d'>(empty — configure)</a></td>"
-                    "<td>—</td></tr>",
+                    "<tr style='color:#888'>"
+                    "<td class='tg-hdr' data-label='#'>%d</td>"
+                    "<td data-label='On'>—</td>"
+                    "<td data-label='Label' colspan='4'>"
+                    "<a href='/timers/edit?n=%d'>(empty — configure)</a></td>"
+                    "<td data-label='Topic'>—</td></tr>",
                     i, i);
             } else {
                 char topic_short[40];
@@ -3258,12 +3347,15 @@ static void handle_http_client(int client_fd)
                     ? "<span title='repeats'>↻</span>"
                     : "<span style='color:#aaa' title='fires once then disarms'>1×</span>";
                 pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
-                    "<tr><td>%d</td><td>%s</td>"
-                    "<td><a href='/timers/edit?n=%d'>%s</a></td>"
-                    "<td>%02u:%02u</td>"
-                    "<td>%s</td>"
-                    "<td><code>%s</code></td>"
-                    "<td><code style='font-size:0.85em'>%s</code></td></tr>",
+                    "<tr>"
+                    "<td class='tg-hdr' data-label='#'>%d</td>"
+                    "<td data-label='On'>%s</td>"
+                    "<td data-label='Label'><a href='/timers/edit?n=%d'>%s</a></td>"
+                    "<td data-label='Time'>%02u:%02u</td>"
+                    "<td data-label='Rep'>%s</td>"
+                    "<td data-label='Days'><code>%s</code></td>"
+                    "<td data-label='Topic'><code style='font-size:0.85em'>%s</code></td>"
+                    "</tr>",
                     i, on_html,
                     i, t.label[0] ? t.label : "(unnamed)",
                     (unsigned)(t.minute_of_day / 60),
@@ -3276,7 +3368,7 @@ static void handle_http_client(int client_fd)
         }
         /* P1 #8: drop "Click a row to edit" filler; show "N dropped fires"
          * only when N > 0 — zero is the boring case and noise. */
-        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</table>");
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "</tbody></table>");
         uint32_t dropped = timers_dropped_count();
         if (dropped > 0) {
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
@@ -3405,7 +3497,20 @@ static void handle_http_client(int client_fd)
             }
         }
 
+        /* 0.8.2 P2 #10/#11: Save / Test fire / Clear share a flex row on
+         * ≥ 600 px viewports. The wrapping <form id='timer-save'> closes
+         * just before .tbtns; the Save button uses form='timer-save' so
+         * it can submit it from outside. Three sibling <form>s sit inside
+         * .tbtns (Save's wrapper is intentionally empty so flex spacing
+         * stays uniform). Below 600 px the row collapses to stacked
+         * full-width buttons (mobile). */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<style>"
+            ".tbtns{display:flex;flex-direction:column;gap:6px;margin-top:8px}"
+            ".tbtns form{flex:1;margin:0}"
+            ".tbtns .btn{margin:0}"
+            "@media (min-width:600px){.tbtns{flex-direction:row}}"
+            "</style>"
             "<hr style='border:0;border-top:1px solid #555;margin:12px 0'>"
             "<label>Publish topic</label>"
             "<input type='text' name='topic' maxlength='%d' value='%s' placeholder='home/lights/cmd'>"
@@ -3414,19 +3519,23 @@ static void handle_http_client(int client_fd)
             "<p><label><input type='radio' name='qos' value='0'%s>QoS 0</label>"
             "<label><input type='radio' name='qos' value='1'%s>QoS 1</label>"
             "<label><input type='checkbox' name='retain' value='1'%s>Retain</label></p>"
-            "<button type='submit' class='btn bgrn'>Save</button>"
             "</form>"
-            "<form method='POST' action='/timers/fire' style='margin-top:6px'>"
+            "<div class='tbtns'>"
+            "<form>"
+            "<button form='timer-save' type='submit' class='btn bgrn'>Save</button>"
+            "</form>"
+            "<form method='POST' action='/timers/fire'>"
             "<input type='hidden' name='csrf' value='%s'>"
             "<input type='hidden' name='n' value='%d'>"
             "<button type='submit' class='btn'>Test fire now</button>"
             "</form>"
-            "<form method='POST' action='/timers/clear' style='margin-top:6px' "
+            "<form method='POST' action='/timers/clear' "
             "onsubmit=\"return confirm('Clear timer %d?')\">"
             "<input type='hidden' name='csrf' value='%s'>"
             "<input type='hidden' name='n' value='%d'>"
             "<button type='submit' class='btn bred'>Clear slot</button>"
             "</form>"
+            "</div>"
             "</fieldset>"
             "<a href='/timers' class='btn bgry'>Back</a>",
             TIMERS_TOPIC_MAX, t.topic,
@@ -3562,6 +3671,71 @@ static void handle_http_client(int client_fd)
             "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
             "Content-Length: 0\r\nConnection: close\r\n\r\n", loc);
         send(client_fd, body, (size_t)hlen, 0);
+        free(body); close(client_fd); return;
+
+    } else if (strncmp(req.path, "/api/timers/", 12) == 0 &&
+               (req.method == REQ_PUT || req.method == REQ_DELETE)) {
+        /* 0.8.2: write half of the JSON API. Path is /api/timers/<n>
+         * (1-based). CSRF is required for both methods. PUT body is
+         * a single JSON slot object — same schema as one element of
+         * GET /api/timers "timers" array. DELETE wipes the slot. */
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+            free(body); close(client_fd); return;
+        }
+        int slot = atoi(req.path + 12);
+        if (slot < 1 || slot > TIMERS_SLOT_COUNT) {
+            const char *err = "{\"error\":\"slot out of range (1..16)\"}";
+            size_t el = strlen(err);
+            http_response_start(client_fd, "400 Bad Request", "application/json", el);
+            http_send_body(client_fd, err, el);
+            free(body); close(client_fd); return;
+        }
+        if (req.method == REQ_DELETE) {
+            esp_err_t cr = timers_clear(slot);
+            if (cr != ESP_OK) {
+                const char *err = "{\"error\":\"clear failed\"}";
+                size_t el = strlen(err);
+                http_response_start(client_fd, "500 Internal Server Error",
+                                    "application/json", el);
+                http_send_body(client_fd, err, el);
+            } else {
+                char ok[64];
+                int ol = snprintf(ok, sizeof(ok),
+                    "{\"cleared\":true,\"n\":%d}", slot);
+                http_response_start(client_fd, "200 OK", "application/json", (size_t)ol);
+                http_send_body(client_fd, ok, (size_t)ol);
+            }
+            free(body); close(client_fd); return;
+        }
+        /* PUT: parse JSON body → timer_slot_t → validate → persist. */
+        timer_slot_t newslot;
+        if (timers_parse_slot_json(req.body, &newslot) != ESP_OK) {
+            const char *err = "{\"error\":\"malformed JSON body\"}";
+            size_t el = strlen(err);
+            http_response_start(client_fd, "400 Bad Request", "application/json", el);
+            http_send_body(client_fd, err, el);
+            free(body); close(client_fd); return;
+        }
+        char verr[80] = "";
+        esp_err_t sr = timers_set(slot, &newslot, verr, sizeof(verr));
+        if (sr != ESP_OK) {
+            char errjson[160];
+            int el = snprintf(errjson, sizeof(errjson),
+                "{\"error\":\"%s\"}",
+                verr[0] ? verr : "validation failed");
+            http_response_start(client_fd, "400 Bad Request",
+                                "application/json", (size_t)el);
+            http_send_body(client_fd, errjson, (size_t)el);
+            free(body); close(client_fd); return;
+        }
+        int64_t nx = timers_next_fire_unix(slot);
+        char ok[96];
+        int ol = snprintf(ok, sizeof(ok),
+            "{\"saved\":true,\"n\":%d,\"next_fire_unix\":%lld}",
+            slot, (long long)nx);
+        http_response_start(client_fd, "200 OK", "application/json", (size_t)ol);
+        http_send_body(client_fd, ok, (size_t)ol);
         free(body); close(client_fd); return;
 
     } else if (strcmp(req.path, "/api/timers") == 0 && req.method == REQ_GET) {
