@@ -186,11 +186,11 @@ static size_t html_escape(const char *in, size_t in_len, char *out, size_t outsz
 
 /* === Streaming POST handler === */
 
-#define POST_BODY_MAX  8192  /* hard cap; berry_save_script enforces its own 3500 */
+#define POST_BODY_MAX  8192  /* hard cap; script truncated at BERRY_SCRIPT_MAX */
 
 void portal_berry_handle_post_stream(int client_fd,
                                      char *header_buf, int header_len,
-                                     portal_berry_post_kind_t kind)
+                                     portal_berry_post_kind_t kind, int slot)
 {
     /* Find body start (after \r\n\r\n) within header_buf. */
     char *bstart = strstr(header_buf, "\r\n\r\n");
@@ -219,11 +219,9 @@ void portal_berry_handle_post_stream(int client_fd,
         return;
     }
 
-    /* Copy whatever body bytes are already in header_buf. */
     int copied = body_in_hdr < content_length ? body_in_hdr : content_length;
     if (copied > 0) memcpy(body, bstart, (size_t)copied);
 
-    /* Stream the rest from the socket. */
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
     setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     int received = copied;
@@ -240,13 +238,10 @@ void portal_berry_handle_post_stream(int client_fd,
     }
     body[content_length] = '\0';
 
-    /* CSRF: header takes precedence; fall back to body field. */
+    /* CSRF: header takes precedence; fall back to body field or URL query. */
     char csrf_hdr[CSRF_TOKEN_BUF_SIZE] = "";
     parse_csrf_header(header_buf, csrf_hdr, sizeof(csrf_hdr));
-    if (csrf_hdr[0] == '\0') {
-        /* Try URL query (POST /berry/save?csrf=xxx) for curl users. */
-        parse_csrf_query(header_buf, csrf_hdr, sizeof(csrf_hdr));
-    }
+    if (csrf_hdr[0] == '\0') parse_csrf_query(header_buf, csrf_hdr, sizeof(csrf_hdr));
     if (!csrf_verify(csrf_hdr[0] ? csrf_hdr : NULL, body)) {
         ESP_LOGW(TAG, "POST: csrf rejected");
         send_plain(client_fd, "403 Forbidden", "CSRF token invalid or missing");
@@ -255,8 +250,7 @@ void portal_berry_handle_post_stream(int client_fd,
         return;
     }
 
-    /* Decode the `script` field. Heap-alloc so we don't have to size
-     * for the worst case on stack. */
+    /* Decode common fields. */
     char *script = (char *)malloc((size_t)content_length + 1);
     if (!script) {
         send_plain(client_fd, "500 Internal Server Error", "OOM");
@@ -267,33 +261,44 @@ void portal_berry_handle_post_stream(int client_fd,
     size_t script_len = form_get_field(body, (size_t)content_length,
                                        "script", script, (size_t)content_length + 1);
 
-    if (kind == PORTAL_BERRY_POST_SAVE) {
-        bool ok = berry_save_script(script, script_len);
+    if (kind == PORTAL_BERRY_POST_SLOT_SAVE) {
+        /* Per-slot save: name + script + enabled checkbox. */
+        char label[BERRY_LABEL_MAX] = "";
+        form_get_field(body, (size_t)content_length,
+                       "name", label, sizeof(label));
+        char en_str[4] = "";
+        form_get_field(body, (size_t)content_length, "enabled", en_str, sizeof(en_str));
+        /* HTML checkboxes POST "on" when checked, absent when unchecked. */
+        bool enabled = (en_str[0] != '\0');
+        bool ok = berry_slot_save(slot,
+                                  label[0] ? label : NULL, strlen(label),
+                                  script, script_len, enabled);
         free(script);
         free(body);
-        if (ok) {
-            send_redirect(client_fd, "/berry?saved=1");
-        } else {
-            send_plain(client_fd, "500 Internal Server Error",
-                       "Failed to save script to NVS");
-        }
+        char redir[40];
+        snprintf(redir, sizeof(redir), ok ? "/berry?saved=%d" : "/berry?err=%d", slot);
+        send_redirect(client_fd, redir);
         close(client_fd);
         return;
     }
 
-    /* PORTAL_BERRY_POST_EVAL — run once, render result inline. */
+    if (kind == PORTAL_BERRY_POST_SAVE) {
+        bool ok = berry_save_script(script, script_len);
+        free(script);
+        free(body);
+        send_redirect(client_fd, ok ? "/berry?saved=0" : "/berry?err=0");
+        close(client_fd);
+        return;
+    }
+
+    /* PORTAL_BERRY_POST_EVAL — run once, return result page for JS parsing. */
     char result[512] = "";
     bool ok = berry_eval(script, result, sizeof(result), 3000);
     free(script);
     free(body);
 
-    /* Compose an HTML response: the editor page again with a result box
-     * inlined at the top. Simpler than a full re-render: a small status
-     * panel plus a "back to editor" link. The page itself auto-refreshes
-     * its log pane so the user sees stdout from the snippet there too. */
     char esc[600];
     html_escape(result, strlen(result), esc, sizeof(esc));
-
     char html[1400];
     int n = snprintf(html, sizeof(html),
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -301,22 +306,17 @@ void portal_berry_handle_post_stream(int client_fd,
         "<title>Berry &mdash; eval</title>"
         "<style>"
         "body{margin:0;background:#1f1f1f;color:#eaeaea;font-family:sans-serif;padding:16px}"
-        ".bar{margin-bottom:10px}"
-        ".bar a{color:#1fa3ec;text-decoration:none}"
-        ".bar a:hover{text-decoration:underline}"
+        ".bar{margin-bottom:10px}.bar a{color:#1fa3ec;text-decoration:none}"
         ".rb{background:#0f0f0f;border:1px solid #444;padding:10px;"
         "border-radius:4px;white-space:pre-wrap;word-wrap:break-word;"
         "font-family:monospace;font-size:13px;max-height:60vh;overflow:auto}"
-        ".ok{border-left:4px solid #2e7d32}"
-        ".err{border-left:4px solid #c62828}"
+        ".ok{border-left:4px solid #2e7d32}.err{border-left:4px solid #c62828}"
         "</style></head><body>"
-        "<div class='bar'><a href='/berry'>&larr; back to editor</a> &middot; "
-        "<a href='/'>home</a></div>"
+        "<div class='bar'><a href='/berry'>&larr; back</a></div>"
         "<h2>Eval %s</h2>"
         "<div class='rb %s'>%s</div>"
         "</body></html>",
-        ok ? "ok" : "error",
-        ok ? "ok" : "err",
+        ok ? "ok" : "error", ok ? "ok" : "err",
         esc[0] ? esc : "(no result)");
     if (n < 0) n = 0;
     send_simple(client_fd, "200 OK", "text/html; charset=utf-8", html, (size_t)n);
@@ -333,62 +333,58 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
     berry_status_t st = {0};
     berry_get_status(&st);
 
-    /* Pull the persisted script + HTML-escape it for the textarea. */
-    char *script = (char *)malloc(BERRY_SCRIPT_MAX + 1);
-    char *script_esc = (char *)malloc(2 * (BERRY_SCRIPT_MAX + 8));
-    size_t script_len = 0;
-    if (script && script_esc) {
-        script_len = berry_get_script(script, BERRY_SCRIPT_MAX + 1);
-        html_escape(script, script_len, script_esc, 2 * (BERRY_SCRIPT_MAX + 8));
-    }
+#define BPOS (out + pos)
+#define BREM (outsz - (size_t)pos)
+#define GUARD if (pos > (int)outsz - 512) goto done
 
-    pos += snprintf(out + pos, outsz - pos,
+    pos += snprintf(BPOS, BREM,
         "<style>"
         ".bgrid{display:flex;flex-direction:column;gap:12px}"
         ".bcard{border:1px solid #444;border-radius:4px;padding:10px;background:#262626}"
-        ".bcard h3{margin:0 0 8px 0;font-size:1em;color:#1fa3ec}"
+        ".bcard h3{margin:0 0 8px;font-size:1em;color:#1fa3ec;display:flex;"
+        "align-items:center;gap:8px}"
         ".bcard textarea{width:100%%;background:#0f0f0f;color:#eaeaea;"
         "border:1px solid #444;border-radius:3px;padding:8px;"
         "font-family:monospace;font-size:13px;line-height:1.4;"
-        "box-sizing:border-box;resize:vertical}"
-        ".bcard textarea.script{height:280px}"
-        ".bcard textarea.eval{height:80px}"
+        "box-sizing:border-box;resize:vertical;height:200px}"
         ".bcard .meta{font-size:0.85em;color:#888;margin-top:4px}"
         ".bcard button{width:auto !important;line-height:1.6 !important;"
-        "padding:6px 14px !important;font-size:0.95em !important;"
-        "margin-right:6px}"
+        "padding:6px 14px !important;font-size:0.95em !important;margin-right:6px}"
         ".bpill{display:inline-block;padding:2px 8px;border-radius:10px;"
-        "font-size:0.8em;margin-left:6px}"
+        "font-size:0.78em}"
         ".bpill.on{background:#1b5e20;color:#a5d6a7}"
         ".bpill.off{background:#7a2222;color:#ffb0b0}"
+        ".slot-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;"
+        "padding:6px 0;border-bottom:1px solid #333}"
+        ".slot-row:last-child{border-bottom:none}"
+        ".slot-name{flex:1;min-width:80px;font-size:0.95em}"
+        ".slot-btns{display:flex;gap:6px;flex-shrink:0}"
+        ".seditor{display:none;margin-top:10px}"
         "#blog{background:#0f0f0f;border:1px solid #444;border-radius:3px;"
         "padding:8px;font-family:monospace;font-size:12px;line-height:1.4;"
-        "white-space:pre-wrap;word-wrap:break-word;height:240px;overflow:auto;"
+        "white-space:pre-wrap;word-wrap:break-word;height:200px;overflow:auto;"
         "color:#cfcfcf}"
         ".srow{display:flex;flex-wrap:wrap;gap:10px;font-size:0.85em;color:#aaa}"
         ".srow span b{color:#eaeaea}"
+        ".rb{background:#0f0f0f;border:1px solid #444;padding:10px;"
+        "border-radius:4px;white-space:pre-wrap;font-family:monospace;"
+        "font-size:13px;max-height:40vh;overflow:auto;margin-top:8px}"
+        ".ok{border-left:4px solid #2e7d32}.err{border-left:4px solid #c62828}"
         "</style>"
         "<fieldset><legend>&nbsp;Berry scripting&nbsp;</legend>"
         "<div class='bgrid'>");
+    GUARD;
 
     /* Status card */
-    pos += snprintf(out + pos, outsz - pos,
+    pos += snprintf(BPOS, BREM,
         "<div class='bcard'>"
-        "<h3>Status"
-        "<span class='bpill %s'>%s</span>"
-        "</h3>"
+        "<h3>Status <span class='bpill %s'>%s</span></h3>"
         "<div class='srow'>"
-        "<span>Script <b>%u</b> B</span>"
         "<span>Evals <b>%u</b></span>"
         "<span>Errors <b>%u</b></span>"
         "<span>VM uptime <b>%u</b> s</span>"
         "</div>"
         "<div style='margin-top:8px'>"
-        "<form method='POST' action='/berry/enable' style='display:inline'>"
-        "<input type='hidden' name='csrf' value='%s'>"
-        "<input type='hidden' name='enable' value='%d'>"
-        "<button type='submit'>%s scripting</button>"
-        "</form>"
         "<form method='POST' action='/berry/restart' style='display:inline'>"
         "<input type='hidden' name='csrf' value='%s'>"
         "<button type='submit'>Restart VM</button>"
@@ -397,69 +393,136 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
         "</div>",
         st.enabled ? "on" : "off",
         st.enabled ? "enabled" : "disabled",
-        (unsigned)st.script_len,
-        st.evals_total,
-        st.errors_total,
+        st.evals_total, st.errors_total,
         (unsigned)(st.uptime_ms / 1000),
-        csrf_token,
-        st.enabled ? 0 : 1,
-        st.enabled ? "Disable" : "Enable",
         csrf_token);
+    GUARD;
 
-    /* Autoexec editor */
-    pos += snprintf(out + pos, outsz - pos,
+    /* Script slots card */
+    pos += snprintf(BPOS, BREM,
         "<div class='bcard'>"
-        "<h3>autoexec.be</h3>"
-        "<form method='POST' action='/berry/save'>"
-        "<input type='hidden' name='csrf' value='%s'>"
-        "<textarea name='script' class='script' "
-        "placeholder='# runs on every boot when scripting is enabled\n"
-        "# import mqtt\n"
-        "# mqtt.subscribe(\"sensor/+\", def (t,p) print(t,p) end)'>%s</textarea>"
-        "<div class='meta'>Saved to NVS \xc2\xb7 max %d bytes \xc2\xb7 "
-        "saving restarts the VM and re-runs this script</div>"
-        "<div style='margin-top:8px'>"
-        "<button type='submit'>Save &amp; restart</button>"
-        "</div>"
-        "</form>"
+        "<h3>Scripts</h3>"
+        "<div class='meta' style='margin-bottom:8px'>"
+        "Up to %d slots \xc2\xb7 enabled slots run in order on boot/restart \xc2\xb7 "
+        "max %d bytes each"
         "</div>",
-        csrf_token,
-        script_esc ? script_esc : "",
-        BERRY_SCRIPT_MAX);
+        BERRY_SLOT_COUNT, BERRY_SCRIPT_MAX);
+    GUARD;
+
+    /* One row per slot */
+    for (int s = 0; s < BERRY_SLOT_COUNT; s++) {
+        berry_slot_t sl = {0};
+        bool ok = berry_slot_get(s, &sl);
+        const char *label = sl.label[0] ? sl.label : "";
+
+        /* Escape script for textarea */
+        size_t esc_sz = sl.script_len > 0 ? sl.script_len * 2 + 8 : 8;
+        char *script_esc = (char *)malloc(esc_sz);
+        if (script_esc && sl.script && sl.script_len > 0) {
+            html_escape(sl.script, sl.script_len, script_esc, esc_sz);
+        } else if (script_esc) {
+            script_esc[0] = '\0';
+        }
+
+        (void)ok;
+
+        pos += snprintf(BPOS, BREM,
+            "<div class='slot-row'>"
+            "<span class='bpill %s' style='flex-shrink:0'>%s</span>"
+            "<span class='slot-name'>%s</span>"
+            "<span style='font-size:0.8em;color:#666'>%u B</span>"
+            "<div class='slot-btns'>"
+            "<button type='button' onclick='btoggle(%d)'>Edit</button>"
+            "</div>"
+            "</div>"
+            "<div class='seditor' id='sed%d'>"
+            "<form method='POST' action='/berry/slot/%d/save'>"
+            "<input type='hidden' name='csrf' value='%s'>"
+            "<div style='display:flex;gap:8px;align-items:center;margin-bottom:6px'>"
+            "<input type='text' name='name' value='%s' maxlength='31' "
+            "placeholder='Script name' "
+            "style='flex:1;background:#0f0f0f;color:#eaeaea;border:1px solid #444;"
+            "border-radius:3px;padding:4px 8px;font-size:0.95em'>"
+            "<label style='display:flex;align-items:center;gap:4px;font-size:0.9em'>"
+            "<input type='checkbox' name='enabled' value='on' %s> Enable"
+            "</label>"
+            "</div>"
+            "<textarea name='script' "
+            "placeholder='# Berry script\nprint(\"hello\")'>%s</textarea>"
+            "<div class='meta'>Slot %d \xc2\xb7 max %d bytes \xc2\xb7 "
+            "saving restarts the VM</div>"
+            "<div style='margin-top:8px'>"
+            "<button type='submit'>Save &amp; restart</button>"
+            "<button type='button' onclick='bclose(%d)' "
+            "style='background:#333'>Cancel</button>"
+            "</div>"
+            "</form>"
+            "</div>",
+            sl.enabled ? "on" : "off",
+            sl.enabled ? "on" : "off",
+            label[0] ? label : "(empty)",
+            (unsigned)sl.script_len,
+            s, /* onclick btoggle arg */
+            s, /* sed%d id */
+            s, /* form action slot number */
+            csrf_token,
+            label,
+            sl.enabled ? "checked" : "",
+            script_esc ? script_esc : "",
+            s, BERRY_SCRIPT_MAX,
+            s /* onclick bclose arg */
+        );
+
+        free(script_esc);
+        if (sl.script) free(sl.script);
+        GUARD;
+    }
+
+    pos += snprintf(BPOS, BREM, "</div>"); /* close bcard */
+    GUARD;
 
     /* Run-once REPL */
-    pos += snprintf(out + pos, outsz - pos,
+    pos += snprintf(BPOS, BREM,
         "<div class='bcard' id='beval'>"
         "<h3>Run once</h3>"
         "<form method='POST' action='/berry/eval' id='bevalform'>"
         "<input type='hidden' name='csrf' value='%s' id='bevcsrf'>"
-        "<textarea name='script' class='eval' id='bevalscript' "
+        "<textarea name='script' id='bevalscript' "
         "placeholder='1 + 1'></textarea>"
-        "<div class='meta'>Evaluates against the live VM. "
-        "Globals defined here persist until restart.</div>"
+        "<div class='meta'>Evaluates in the live VM. "
+        "Globals persist until restart.</div>"
         "<div style='margin-top:8px'>"
         "<button type='submit' id='bevalrun'>Run</button>"
         "</div>"
         "</form>"
-        /* Result box: hidden until first run */
-        "<div id='bevalresult' style='display:none;margin-top:10px'>"
+        "<div id='bevalresult' style='display:none'>"
         "<div id='bevalout' class='rb'></div>"
         "</div>"
         "</div>",
         csrf_token);
+    GUARD;
 
-    /* Log pane (polled by JS; degrades to a static snapshot without JS) */
-    pos += snprintf(out + pos, outsz - pos,
+    /* Log pane */
+    pos += snprintf(BPOS, BREM,
         "<div class='bcard'>"
         "<h3>Log</h3>"
         "<div id='blog'>loading...</div>"
         "<div class='meta'>Auto-refreshes every 2 s. "
         "<a href='/api/berry/log' style='color:#1fa3ec'>raw</a></div>"
         "</div>");
+    GUARD;
 
-    pos += snprintf(out + pos, outsz - pos,
+    pos += snprintf(BPOS, BREM,
         "</div></fieldset>"
         "<script>"
+        /* Slot editor toggle */
+        "function btoggle(n){"
+        "var el=document.getElementById('sed'+n);"
+        "el.style.display=el.style.display===''?'none':'';"
+        "}"
+        "function bclose(n){"
+        "document.getElementById('sed'+n).style.display='none';"
+        "}"
         /* Log auto-poll */
         "(function(){"
         "var el=document.getElementById('blog');"
@@ -481,15 +544,9 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
         "if(!form)return;"
         "form.addEventListener('submit',function(e){"
         "e.preventDefault();"
-        /* Refresh CSRF before submit in case the page has been open a while.
-         * Fire-and-forget: on failure we fall through with the stale token
-         * (the eval endpoint will 403 and we show that as an error). */
         "fetch('/api/csrf',{cache:'no-store'})"
         ".then(function(r){return r.json()})"
-        ".then(function(d){"
-        "document.getElementById('bevcsrf').value=d.token||'';"
-        "return d.token;"
-        "})"
+        ".then(function(d){document.getElementById('bevcsrf').value=d.token||'';return d.token;})"
         ".catch(function(){return '';})"
         ".then(function(tok){"
         "btn.disabled=true;btn.textContent='Running...';"
@@ -498,38 +555,34 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
         "body.append('csrf',tok);"
         "return fetch('/berry/eval',{"
         "method:'POST',"
-        "headers:{'Content-Type':'application/x-www-form-urlencoded',"
-        "'X-CSRF-Token':tok},"
+        "headers:{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':tok},"
         "body:body.toString()"
         "});"
         "})"
         ".then(function(r){return r.text();})"
         ".then(function(html){"
-        /* Parse result text and class out of the returned HTML page */
-        "var tmp=document.createElement('div');"
-        "tmp.innerHTML=html;"
-        "var rb=tmp.querySelector('.rb');"
-        "var isErr=rb&&rb.classList.contains('err');"
+        "var tmp=document.createElement('div');tmp.innerHTML=html;"
+        "var rb=tmp.querySelector('.rb');var isErr=rb&&rb.classList.contains('err');"
         "out.textContent=rb?rb.textContent:'(no result)';"
         "out.className='rb '+(isErr?'err':'ok');"
-        "wrap.style.display='';"
-        "out.scrollTop=out.scrollHeight;"
+        "wrap.style.display='';out.scrollTop=out.scrollHeight;"
         "})"
-        ".catch(function(e){"
-        "out.textContent='fetch error: '+e;"
-        "out.className='rb err';"
-        "wrap.style.display='';"
-        "})"
-        ".finally(function(){"
-        "btn.disabled=false;btn.textContent='Run';"
+        ".catch(function(e){out.textContent='fetch error: '+e;out.className='rb err';wrap.style.display='';})"
+        ".finally(function(){btn.disabled=false;btn.textContent='Run';});"
         "});"
-        "});"
+        "})();"
+        /* Auto-open slot editor if ?saved=N or ?err=N in URL */
+        "(function(){"
+        "var m=location.search.match(/[?&](?:saved|err)=(\\d)/);"
+        "if(m)btoggle(parseInt(m[1]));"
         "})();"
         "</script>");
 
-    free(script);
-    free(script_esc);
+done:
     return (size_t)pos;
+#undef BPOS
+#undef BREM
+#undef GUARD
 }
 
 /* === API renderers === */

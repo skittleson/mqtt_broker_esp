@@ -55,6 +55,8 @@
 #endif
 
 #include "portal_ws.h"
+#include "portal_berry.h"
+#include "berry_runtime.h"   /* BERRY_SLOT_COUNT for /berry/slot/N dispatch */
 
 static const char *TAG = "portal";
 
@@ -1246,6 +1248,63 @@ static void handle_http_client(int client_fd)
         return;
     }
 
+    /* ---- Berry script POST early-intercept ----
+     * /berry/save, /berry/eval, and /berry/slot/N/save bodies may exceed
+     * http_request_t.body's 512-byte cap (scripts are up to BERRY_SCRIPT_MAX).
+     * Hand off to the streaming handler before http_parse truncates.
+     * Auth is enforced here; portal_berry_handle_post_stream does CSRF. */
+    if (strncmp(buf, "POST ", 5) == 0 &&
+        (strstr(buf, " /berry/save ") || strstr(buf, " /berry/save?") ||
+         strstr(buf, " /berry/eval ") || strstr(buf, " /berry/eval?") ||
+         strstr(buf, " /berry/slot/"))) {
+
+        portal_berry_post_kind_t kind = PORTAL_BERRY_POST_EVAL;
+        int slot = 0;
+        if (strstr(buf, " /berry/save")) {
+            kind = PORTAL_BERRY_POST_SAVE;
+        } else if (strstr(buf, " /berry/slot/")) {
+            kind = PORTAL_BERRY_POST_SLOT_SAVE;
+            /* Extract slot number: /berry/slot/N/save */
+            const char *p = strstr(buf, "/berry/slot/");
+            if (p) slot = atoi(p + 12);
+            if (slot < 0 || slot >= BERRY_SLOT_COUNT) slot = 0;
+        }
+
+        char *buf_copy = (char *)malloc(total + 1);
+        if (!buf_copy) { free(buf); close(client_fd); return; }
+        memcpy(buf_copy, buf, total);
+        buf_copy[total] = '\0';
+
+        http_request_t auth_req;
+        http_parse((const uint8_t *)buf_copy, (size_t)total, &auth_req);
+        free(buf_copy);
+
+        char cfg_user[65] = "";
+        char cfg_pass[65] = "";
+        nvs_settings_get_str("auth_user", cfg_user, sizeof(cfg_user), "");
+        nvs_settings_get_str("auth_pass", cfg_pass, sizeof(cfg_pass), "");
+
+        if (cfg_user[0] != '\0' && cfg_pass[0] != '\0') {
+            bool auth_ok = (strcmp(auth_req.auth_user, cfg_user) == 0 &&
+                            strcmp(auth_req.auth_pass, cfg_pass) == 0);
+            if (!auth_ok) {
+                const char *resp =
+                    "HTTP/1.1 401 Unauthorized\r\n"
+                    "WWW-Authenticate: Basic realm=\"MQTT Broker\"\r\n"
+                    "Content-Length: 12\r\n"
+                    "Connection: close\r\n\r\nUnauthorized";
+                send(client_fd, resp, strlen(resp), MSG_NOSIGNAL);
+                free(buf);
+                close(client_fd);
+                return;
+            }
+        }
+
+        portal_berry_handle_post_stream(client_fd, buf, total, kind, slot);
+        free(buf);
+        return;  /* socket closed by the streaming handler */
+    }
+
     /* ---- WebSocket upgrade for /tester ----
      * Detected on the raw header buffer (like OTA) because the upgrade
      * needs the original Sec-WebSocket-Key header which http_parse drops.
@@ -1540,6 +1599,7 @@ static void handle_http_client(int client_fd)
             "<a href='/clients' class='btn'>Connected Clients</a>"
             "<a href='/tester' class='btn'>MQTT Tester</a>"
             "<a href='/timers' class='btn'>Timers</a>"
+            "<a href='/berry' class='btn'>Berry Scripting</a>"
             "<a href='/time' class='btn'>Time / NTP</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
@@ -3793,6 +3853,51 @@ static void handle_http_client(int client_fd)
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "]}");
         http_response_start(client_fd, "200 OK", "application/json", (size_t)pos);
         http_send_body(client_fd, body, (size_t)pos);
+
+    /* ============ Berry scripting ============
+     * /berry/save and /berry/eval are handled by the streaming
+     * intercept above (they don't reach this dispatch table). */
+    } else if (strcmp(req.path, "/berry") == 0 && req.method == REQ_GET) {
+        int pos = (int)portal_berry_render_page(body, PAGE_BUF_SIZE, csrf_token_hex());
+        http_send_page(client_fd, body, (size_t)pos);
+
+    } else if (strcmp(req.path, "/berry/restart") == 0 && req.method == REQ_POST) {
+        if (!portal_berry_do_restart(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+        } else {
+            http_send_redirect(client_fd, "/berry?restarted=1");
+        }
+
+    } else if (strcmp(req.path, "/berry/enable") == 0 && req.method == REQ_POST) {
+        char val[8] = "";
+        bool en = false;
+        if (urldecode_param(req.body, "enable", val, sizeof(val))) {
+            en = (val[0] == '1');
+        }
+        if (!portal_berry_do_set_enabled(req.csrf_header, req.body, en)) {
+            http_send_csrf_403(client_fd);
+        } else {
+            http_send_redirect(client_fd, "/berry?enabled=1");
+        }
+
+    } else if (strcmp(req.path, "/api/berry/status") == 0 && req.method == REQ_GET) {
+        int pos = (int)portal_berry_render_status_json(body, PAGE_BUF_SIZE);
+        http_response_start(client_fd, "200 OK", "application/json", (size_t)pos);
+        http_send_body(client_fd, body, (size_t)pos);
+
+    } else if (strcmp(req.path, "/api/berry/log") == 0 && req.method == REQ_GET) {
+        int pos = (int)portal_berry_render_log_text(body, PAGE_BUF_SIZE);
+        http_response_start(client_fd, "200 OK", "text/plain; charset=utf-8", (size_t)pos);
+        http_send_body(client_fd, body, (size_t)pos);
+
+    } else if (strcmp(req.path, "/api/berry/restart") == 0 && req.method == REQ_POST) {
+        if (!portal_berry_do_restart(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+        } else {
+            const char *r = "{\"ok\":true}";
+            http_response_start(client_fd, "200 OK", "application/json", strlen(r));
+            http_send_body(client_fd, r, strlen(r));
+        }
 
     /* ============ 404 ============ */
     } else {

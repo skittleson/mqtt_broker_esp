@@ -1,23 +1,11 @@
-/* Berry runtime — Phase 1 + 2 + 3.
+/* Berry runtime — Phase 1 + 2 + 3 + multi-slot scripts.
  *
- * P1:
- *   - Single Berry VM owned by berry_task on CPU 1.
- *   - berry_eval() for one-shot snippets via request/response queue.
- *   - be_writebuffer() captures into a ~4 KB ring buffer + ESP_LOG mirror.
- *
- * P2:
- *   - NVS persistence under "mqtt_cfg" (berry_en u8, berry_script str).
- *   - autoexec runs when berry_en && script_len > 0, immediately after
- *     the VM is constructed on first boot or restart.
- *   - berry_save_script / berry_set_enabled / berry_restart exposed for
- *     portal_berry.c.
- *
- * P3 (this revision):
- *   - berry_mod_mqtt_register() wired into vm_construct().
- *   - `mqtt` global available to scripts: subscribe/unsubscribe/publish.
- *   - berry_publish_topic_event() / berry_has_topic_subs() called from
- *     mqtt_broker.c::handle_publish_internal() after fanout.
- *   - dispatch_topic() iterates _be_mqtt_subs and fires matching callbacks.
+ * P1: Berry VM, REPL via berry_eval().
+ * P2: NVS persistence, autoexec, berry_restart().
+ * P3: topic-event hook, berry_publish_topic_event().
+ * Multi-slot: 4 named script slots (berry_s0_nm/sc/en … berry_s3_nm/sc/en).
+ *   Legacy single-slot keys (berry_en, berry_script) are migrated to slot 0
+ *   on first access when the new keys are absent.
  */
 #include "berry_runtime.h"
 #include "berry_mod_mqtt.h"
@@ -40,11 +28,158 @@
 
 static const char *TAG = "berry";
 
-#define BERRY_NVS_NS    "mqtt_cfg"  /* shared with portal/timers; see AGENTS.md §4 */
-#define BERRY_NVS_EN    "berry_en"
-#define BERRY_NVS_SCRIPT "berry_script"
+#define BERRY_NVS_NS     "mqtt_cfg"  /* shared with portal/timers; see AGENTS.md §4 */
 
-/* --- Ring buffer for stdout / log --- */
+/* Legacy single-slot keys (read-only; migrated to slot 0 on first access). */
+#define BERRY_NVS_LEGACY_EN    "berry_en"
+#define BERRY_NVS_LEGACY_SCR   "berry_script"
+
+/* Multi-slot key name buffers.  berry_sN_{nm,sc,en}  (11 chars max → ≤15) */
+static void slot_key(char *out, int slot, const char *suffix)
+{
+    /* e.g. "berry_s0_nm", "berry_s3_sc", "berry_s2_en" */
+    snprintf(out, 16, "berry_s%d_%s", slot, suffix);
+}
+
+/* ---- NVS slot helpers ---- */
+
+static bool nvs_slot_get_enabled(int slot)
+{
+    char key[16]; slot_key(key, slot, "en");
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, key, &v);
+        nvs_close(h);
+    }
+    return v != 0;
+}
+
+static void nvs_slot_set_enabled(int slot, bool en)
+{
+    char key[16]; slot_key(key, slot, "en");
+    nvs_handle_t h;
+    if (nvs_open(BERRY_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, key, en ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static size_t nvs_slot_get_script(int slot, char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0) return 0;
+    buf[0] = '\0';
+    char key[16]; slot_key(key, slot, "sc");
+    nvs_handle_t h;
+    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0;
+    size_t len = bufsz;
+    esp_err_t err = nvs_get_str(h, key, buf, &len);
+    nvs_close(h);
+    if (err != ESP_OK) { buf[0] = '\0'; return 0; }
+    return len > 0 ? len - 1 : 0;
+}
+
+static bool nvs_slot_set_script(int slot, const char *src, size_t src_len)
+{
+    if (!src) src = "";
+    if (src_len > BERRY_SCRIPT_MAX) src_len = BERRY_SCRIPT_MAX;
+    char *tmp = (char *)malloc(src_len + 1);
+    if (!tmp) return false;
+    memcpy(tmp, src, src_len);
+    tmp[src_len] = '\0';
+    char key[16]; slot_key(key, slot, "sc");
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(BERRY_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) { free(tmp); return false; }
+    err = nvs_set_str(h, key, tmp);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    free(tmp);
+    return err == ESP_OK;
+}
+
+static size_t nvs_slot_get_label(int slot, char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0) return 0;
+    buf[0] = '\0';
+    char key[16]; slot_key(key, slot, "nm");
+    nvs_handle_t h;
+    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0;
+    size_t len = bufsz;
+    esp_err_t err = nvs_get_str(h, key, buf, &len);
+    nvs_close(h);
+    if (err != ESP_OK) { buf[0] = '\0'; return 0; }
+    return len > 0 ? len - 1 : 0;
+}
+
+static bool nvs_slot_set_label(int slot, const char *label, size_t label_len)
+{
+    if (!label) label = "";
+    if (label_len >= BERRY_LABEL_MAX) label_len = BERRY_LABEL_MAX - 1;
+    char tmp[BERRY_LABEL_MAX];
+    memcpy(tmp, label, label_len);
+    tmp[label_len] = '\0';
+    char key[16]; slot_key(key, slot, "nm");
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(BERRY_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return false;
+    err = nvs_set_str(h, key, tmp);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+/* One-time migration: if slot-0 keys are absent but legacy keys exist,
+ * copy legacy data into slot 0 and erase legacy keys.
+ * Called once from berry_init() before berry_task starts. */
+static void migrate_legacy_slot(void)
+{
+    /* Check if slot-0 script key already exists. */
+    char sc_key[16]; slot_key(sc_key, 0, "sc");
+    nvs_handle_t h;
+    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    size_t probe = 0;
+    bool slot0_exists = (nvs_get_str(h, sc_key, NULL, &probe) != ESP_ERR_NVS_NOT_FOUND);
+    nvs_close(h);
+    if (slot0_exists) return; /* already migrated */
+
+    /* Read legacy keys. */
+    uint8_t legacy_en = 0;
+    char *legacy_scr = (char *)malloc(3501);
+    if (!legacy_scr) return;
+    legacy_scr[0] = '\0';
+    size_t legacy_len = 0;
+
+    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, BERRY_NVS_LEGACY_EN, &legacy_en);
+        size_t sz = 3501;
+        if (nvs_get_str(h, BERRY_NVS_LEGACY_SCR, legacy_scr, &sz) == ESP_OK && sz > 1)
+            legacy_len = sz - 1;
+        nvs_close(h);
+    }
+
+    /* Write to slot 0 (only if there was something to migrate). */
+    if (legacy_len > 0 || legacy_en) {
+        nvs_slot_set_script(0, legacy_scr, legacy_len);
+        nvs_slot_set_enabled(0, legacy_en != 0);
+        nvs_slot_set_label(0, "autoexec", 8);
+        ESP_LOGI(TAG, "berry: migrated legacy script (%u bytes, en=%d) → slot 0",
+                 (unsigned)legacy_len, legacy_en);
+        /* Erase legacy keys so migration doesn't re-run. */
+        if (nvs_open(BERRY_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_erase_key(h, BERRY_NVS_LEGACY_EN);
+            nvs_erase_key(h, BERRY_NVS_LEGACY_SCR);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    } else {
+        /* No legacy data — write empty slot 0 script key so migration
+         * doesn't run again. */
+        nvs_slot_set_script(0, "", 0);
+    }
+    free(legacy_scr);
+}
 #define BERRY_LOG_RING_SZ   4096
 static char            s_log_ring[BERRY_LOG_RING_SZ];
 static size_t          s_log_head;
@@ -121,68 +256,6 @@ size_t berry_log_snapshot(char *buf, size_t bufsz)
     buf[out] = '\0';
     xSemaphoreGive(s_log_mux);
     return out;
-}
-
-/* --- NVS persistence ---
- * The "mqtt_cfg" namespace is shared with portal.c + timers.c. We open
- * it directly here (same pattern as timers.c) rather than refactoring
- * portal.c's helpers into a shared module mid-feature.
- */
-static bool nvs_load_enabled(void)
-{
-    nvs_handle_t h;
-    uint8_t v = 0;
-    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_u8(h, BERRY_NVS_EN, &v);
-        nvs_close(h);
-    }
-    return v != 0;
-}
-
-static void nvs_store_enabled(bool en)
-{
-    nvs_handle_t h;
-    if (nvs_open(BERRY_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, BERRY_NVS_EN, en ? 1 : 0);
-        nvs_commit(h);
-        nvs_close(h);
-    }
-}
-
-static size_t nvs_load_script(char *buf, size_t bufsz)
-{
-    if (!buf || bufsz == 0) return 0;
-    buf[0] = '\0';
-    nvs_handle_t h;
-    if (nvs_open(BERRY_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0;
-    size_t len = bufsz;
-    esp_err_t err = nvs_get_str(h, BERRY_NVS_SCRIPT, buf, &len);
-    nvs_close(h);
-    if (err != ESP_OK) {
-        buf[0] = '\0';
-        return 0;
-    }
-    /* NVS returns len including NUL; we want bytes-without-NUL. */
-    return len > 0 ? len - 1 : 0;
-}
-
-static bool nvs_store_script(const char *src, size_t src_len)
-{
-    if (!src) src = "";
-    if (src_len > BERRY_SCRIPT_MAX) src_len = BERRY_SCRIPT_MAX;
-    /* Make a NUL-terminated copy because NVS expects a C string. */
-    char *tmp = (char *)malloc(src_len + 1);
-    if (!tmp) return false;
-    memcpy(tmp, src, src_len);
-    tmp[src_len] = '\0';
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(BERRY_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) { free(tmp); return false; }
-    err = nvs_set_str(h, BERRY_NVS_SCRIPT, tmp);
-    if (err == ESP_OK) err = nvs_commit(h);
-    nvs_close(h);
-    free(tmp);
-    return err == ESP_OK;
 }
 
 /* --- Eval / control / topic-event queue ---
@@ -413,28 +486,24 @@ static void dispatch_topic(const char *topic, size_t topic_len,
 
 static void run_autoexec(void)
 {
-    if (!nvs_load_enabled()) {
-        log_event("autoexec skipped (berry_en=0)");
-        return;
-    }
-    char *script = (char *)malloc(BERRY_SCRIPT_MAX + 1);
-    if (!script) {
-        log_event("autoexec: malloc failed");
-        return;
-    }
-    size_t n = nvs_load_script(script, BERRY_SCRIPT_MAX + 1);
-    if (n == 0) {
-        log_event("autoexec skipped (script empty)");
+    bool any_enabled = false;
+    for (int s = 0; s < BERRY_SLOT_COUNT; s++) {
+        if (!nvs_slot_get_enabled(s)) continue;
+        char *script = (char *)malloc(BERRY_SCRIPT_MAX + 1);
+        if (!script) { log_event("slot %d: malloc failed", s); continue; }
+        size_t n = nvs_slot_get_script(s, script, BERRY_SCRIPT_MAX + 1);
+        if (n == 0) { free(script); continue; }
+        any_enabled = true;
+        char label[BERRY_LABEL_MAX] = "";
+        nvs_slot_get_label(s, label, sizeof(label));
+        if (!label[0]) snprintf(label, sizeof(label), "slot%d", s);
+        log_event("autoexec[%d] \"%s\" running (%u bytes)", s, label, (unsigned)n);
+        char result[160];
+        bool ok = run_source(script, result, sizeof(result));
+        if (ok) log_event("autoexec[%d] ok", s);
         free(script);
-        return;
     }
-    log_event("autoexec running (%u bytes)", (unsigned)n);
-    char result[160];
-    bool ok = run_source(script, result, sizeof(result));
-    if (ok) {
-        log_event("autoexec ok");
-    }
-    free(script);
+    if (!any_enabled) log_event("autoexec: no enabled slots");
 }
 
 static void berry_task(void *arg)
@@ -515,6 +584,7 @@ void berry_publish_topic_event(const char *topic, size_t topic_len,
 bool berry_init(void)
 {
     if (s_cmd_q) return true;
+    migrate_legacy_slot();  /* one-time: move berry_en/berry_script → slot 0 */
     s_log_mux = xSemaphoreCreateMutex();
     /* 32-deep so topic-event bursts don't starve eval/restart commands
      * or cause the broker to drop fanout events under normal MQTT load. */
@@ -566,33 +636,7 @@ bool berry_eval(const char *src, char *out_buf, size_t out_buf_sz, int timeout_m
     return ok;
 }
 
-bool berry_save_script(const char *src, size_t src_len)
-{
-    if (src_len > BERRY_SCRIPT_MAX) src_len = BERRY_SCRIPT_MAX;
-    if (!nvs_store_script(src, src_len)) {
-        log_event("save_script: NVS write failed");
-        return false;
-    }
-    log_event("script saved (%u bytes)", (unsigned)src_len);
-    return berry_restart();
-}
-
-size_t berry_get_script(char *buf, size_t bufsz)
-{
-    return nvs_load_script(buf, bufsz);
-}
-
-void berry_set_enabled(bool en)
-{
-    nvs_store_enabled(en);
-    log_event("enabled = %d", en ? 1 : 0);
-    berry_restart();
-}
-
-bool berry_get_enabled(void)
-{
-    return nvs_load_enabled();
-}
+/* ---- Multi-slot public API ---- */
 
 bool berry_restart(void)
 {
@@ -601,21 +645,83 @@ bool berry_restart(void)
     return submit_cmd(&c, 2000);
 }
 
+bool berry_slot_save(int slot, const char *label, size_t label_len,
+                     const char *script, size_t script_len, bool enabled)
+{
+    if (slot < 0 || slot >= BERRY_SLOT_COUNT) return false;
+    bool ok = true;
+    if (label)  ok &= nvs_slot_set_label(slot, label, label_len);
+    if (script) ok &= nvs_slot_set_script(slot, script, script_len);
+    nvs_slot_set_enabled(slot, enabled);
+    log_event("slot %d saved (%u bytes, en=%d)", slot,
+              (unsigned)(script ? script_len : 0), enabled ? 1 : 0);
+    berry_restart();
+    return ok;
+}
+
+bool berry_slot_get(int slot, berry_slot_t *out)
+{
+    if (slot < 0 || slot >= BERRY_SLOT_COUNT || !out) return false;
+    nvs_slot_get_label(slot, out->label, sizeof(out->label));
+    out->enabled = nvs_slot_get_enabled(slot);
+    out->script = (char *)malloc(BERRY_SCRIPT_MAX + 1);
+    if (!out->script) { out->script_len = 0; return false; }
+    out->script_len = nvs_slot_get_script(slot, out->script, BERRY_SCRIPT_MAX + 1);
+    return true;
+}
+
+bool berry_slot_set_enabled(int slot, bool en)
+{
+    if (slot < 0 || slot >= BERRY_SLOT_COUNT) return false;
+    nvs_slot_set_enabled(slot, en);
+    return berry_restart();
+}
+
+/* ---- Legacy shims (slot 0) ---- */
+
+bool berry_save_script(const char *src, size_t src_len)
+{
+    return berry_slot_save(0, NULL, 0, src, src_len,
+                           nvs_slot_get_enabled(0));
+}
+
+size_t berry_get_script(char *buf, size_t bufsz)
+{
+    return nvs_slot_get_script(0, buf, bufsz);
+}
+
+void berry_set_enabled(bool en)
+{
+    nvs_slot_set_enabled(0, en);
+    log_event("slot 0 enabled = %d", en ? 1 : 0);
+    berry_restart();
+}
+
+bool berry_get_enabled(void)
+{
+    return nvs_slot_get_enabled(0);
+}
+
 void berry_get_status(berry_status_t *out)
 {
     if (!out) return;
     memset(out, 0, sizeof(*out));
-    out->enabled = nvs_load_enabled();
+    /* enabled = true if any slot is enabled */
+    for (int s = 0; s < BERRY_SLOT_COUNT; s++) {
+        if (nvs_slot_get_enabled(s)) { out->enabled = true; break; }
+    }
     out->running = s_running;
     out->evals_total  = s_evals_total;
     out->errors_total = s_errors_total;
+    /* script_len = total bytes across all enabled slots */
     char *tmp = (char *)malloc(BERRY_SCRIPT_MAX + 1);
     if (tmp) {
-        out->script_len = nvs_load_script(tmp, BERRY_SCRIPT_MAX + 1);
+        for (int s = 0; s < BERRY_SLOT_COUNT; s++) {
+            if (!nvs_slot_get_enabled(s)) continue;
+            out->script_len += nvs_slot_get_script(s, tmp, BERRY_SCRIPT_MAX + 1);
+        }
         free(tmp);
     }
-    if (s_running && s_vm_start_us > 0) {
+    if (s_running && s_vm_start_us > 0)
         out->uptime_ms = (uint32_t)((esp_timer_get_time() - s_vm_start_us) / 1000);
-    }
-    /* heap_used filled in P7 when the allocator wrapper lands. */
 }
