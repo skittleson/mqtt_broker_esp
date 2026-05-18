@@ -429,18 +429,22 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
 
     /* Run-once REPL */
     pos += snprintf(out + pos, outsz - pos,
-        "<div class='bcard'>"
+        "<div class='bcard' id='beval'>"
         "<h3>Run once</h3>"
-        "<form method='POST' action='/berry/eval'>"
-        "<input type='hidden' name='csrf' value='%s'>"
-        "<textarea name='script' class='eval' "
+        "<form method='POST' action='/berry/eval' id='bevalform'>"
+        "<input type='hidden' name='csrf' value='%s' id='bevcsrf'>"
+        "<textarea name='script' class='eval' id='bevalscript' "
         "placeholder='1 + 1'></textarea>"
         "<div class='meta'>Evaluates against the live VM. "
         "Globals defined here persist until restart.</div>"
         "<div style='margin-top:8px'>"
-        "<button type='submit'>Run</button>"
+        "<button type='submit' id='bevalrun'>Run</button>"
         "</div>"
         "</form>"
+        /* Result box: hidden until first run */
+        "<div id='bevalresult' style='display:none;margin-top:10px'>"
+        "<div id='bevalout' class='rb'></div>"
+        "</div>"
         "</div>",
         csrf_token);
 
@@ -456,6 +460,7 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
     pos += snprintf(out + pos, outsz - pos,
         "</div></fieldset>"
         "<script>"
+        /* Log auto-poll */
         "(function(){"
         "var el=document.getElementById('blog');"
         "function tick(){"
@@ -465,6 +470,60 @@ size_t portal_berry_render_page(char *out, size_t outsz, const char *csrf_token)
         ".catch(function(){});"
         "}"
         "tick();setInterval(tick,2000);"
+        "})();"
+        /* Run-once inline eval */
+        "(function(){"
+        "var form=document.getElementById('bevalform');"
+        "var btn=document.getElementById('bevalrun');"
+        "var out=document.getElementById('bevalout');"
+        "var wrap=document.getElementById('bevalresult');"
+        "var ta=document.getElementById('bevalscript');"
+        "if(!form)return;"
+        "form.addEventListener('submit',function(e){"
+        "e.preventDefault();"
+        /* Refresh CSRF before submit in case the page has been open a while.
+         * Fire-and-forget: on failure we fall through with the stale token
+         * (the eval endpoint will 403 and we show that as an error). */
+        "fetch('/api/csrf',{cache:'no-store'})"
+        ".then(function(r){return r.json()})"
+        ".then(function(d){"
+        "document.getElementById('bevcsrf').value=d.token||'';"
+        "return d.token;"
+        "})"
+        ".catch(function(){return '';})"
+        ".then(function(tok){"
+        "btn.disabled=true;btn.textContent='Running...';"
+        "var body=new URLSearchParams();"
+        "body.append('script',ta.value);"
+        "body.append('csrf',tok);"
+        "return fetch('/berry/eval',{"
+        "method:'POST',"
+        "headers:{'Content-Type':'application/x-www-form-urlencoded',"
+        "'X-CSRF-Token':tok},"
+        "body:body.toString()"
+        "});"
+        "})"
+        ".then(function(r){return r.text();})"
+        ".then(function(html){"
+        /* Parse result text and class out of the returned HTML page */
+        "var tmp=document.createElement('div');"
+        "tmp.innerHTML=html;"
+        "var rb=tmp.querySelector('.rb');"
+        "var isErr=rb&&rb.classList.contains('err');"
+        "out.textContent=rb?rb.textContent:'(no result)';"
+        "out.className='rb '+(isErr?'err':'ok');"
+        "wrap.style.display='';"
+        "out.scrollTop=out.scrollHeight;"
+        "})"
+        ".catch(function(e){"
+        "out.textContent='fetch error: '+e;"
+        "out.className='rb err';"
+        "wrap.style.display='';"
+        "})"
+        ".finally(function(){"
+        "btn.disabled=false;btn.textContent='Run';"
+        "});"
+        "});"
         "})();"
         "</script>");
 
