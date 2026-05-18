@@ -730,7 +730,7 @@ static void http_send_page(int fd, const char *body_content, size_t body_len)
         "<h2>MQTT Broker</h2><h3>ESP32-S3</h3></div>";
     static const char *ftr =
         "<div style='text-align:right;font-size:11px;color:#aaa;'><hr style='border:0;border-top:1px solid #555'>"
-        FW_NAME " " FW_VERSION "</div>"
+        FW_FOOTER "</div>"
         "</div></body></html>";
 
     size_t hdr_len = strlen(hdr);
@@ -1700,7 +1700,7 @@ static void handle_http_client(int client_fd)
 
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Device&nbsp;</legend><table>"
-            "<tr><th>Firmware</th><td>" FW_NAME " " FW_VERSION "</td></tr>"
+            "<tr><th>Firmware</th><td>" FW_FOOTER "</td></tr>"
             "<tr><th>Build</th><td>" __DATE__ " " __TIME__ "</td></tr>"
             "<tr><th>IDF Version</th><td>%s</td></tr>"
             "<tr><th>Partition</th><td>%s</td></tr>"

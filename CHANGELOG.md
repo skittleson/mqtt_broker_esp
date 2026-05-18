@@ -2,6 +2,14 @@
 
 Detailed per-release notes live in [`changelog/`](changelog/).
 
+## 0.8.3 — Author attribution in portal footer
+
+Footer on every portal page and the Information page's Firmware row now
+reads `mqtt_broker 0.8.3 by Spencer Kittleson`. New `FW_AUTHOR` and
+`FW_FOOTER` macros in `version.h` keep the two render sites in sync
+automatically across future version bumps. +48 bytes binary.
+Details: [`changelog/CHANGELOG-v0.8.3.md`](changelog/CHANGELOG-v0.8.3.md).
+
 ## 0.8.2 — Timezone preset dropdown + /timers polish + JSON write API
 
 Headline: **the Timezone field on `/settings` is now a dropdown of ~40

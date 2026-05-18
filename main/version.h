@@ -36,10 +36,19 @@
  * the JSON API: PUT /api/timers/<n> (slot JSON → timers_set + validation)
  * and DELETE /api/timers/<n> (timers_clear). CSRF-protected, returns
  * next_fire_unix in the saved response. */
+/* 0.8.3: Author attribution in portal footer. Adds FW_AUTHOR and
+ * FW_FOOTER to version.h; portal page-wrapper and Information page now
+ * render "mqtt_broker 0.8.3 by Spencer Kittleson" from the single
+ * source of truth. */
 #define FW_VERSION_MAJOR  0
 #define FW_VERSION_MINOR  8
-#define FW_VERSION_PATCH  2
-#define FW_VERSION        "0.8.2"
+#define FW_VERSION_PATCH  3
+#define FW_VERSION        "0.8.3"
 #define FW_NAME           "mqtt_broker"
+#define FW_AUTHOR         "Spencer Kittleson"
+/* Footer string rendered at the bottom of every portal page and on the
+ * Information page. Single source of truth so we never drift between
+ * places that show the firmware identity. */
+#define FW_FOOTER         FW_NAME " " FW_VERSION " by " FW_AUTHOR
 
 #endif /* VERSION_H */
