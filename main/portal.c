@@ -1591,25 +1591,32 @@ static void handle_http_client(int client_fd)
             stats.active_subscriptions,
             up_h, up_m);
 
-        /* Tasmota-style navigation buttons */
+        /* Grouped navigation — labelled sections, Tasmota-style full-width buttons */
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<style>"
+            ".mgrp{margin:10px 0 4px;font-size:0.72em;letter-spacing:0.08em;"
+            "text-transform:uppercase;color:#888;padding-left:2px}"
+            "</style>"
             "<br>"
+            /* Network */
+            "<p class='mgrp'>Network</p>"
             "<a href='/config' class='btn'>Configure WiFi</a>"
-            "<a href='/settings' class='btn'>Configuration</a>"
+            "<a href='/time' class='btn'>Time / NTP</a>"
+            /* Broker */
+            "<p class='mgrp'>Broker</p>"
             "<a href='/clients' class='btn'>Connected Clients</a>"
             "<a href='/tester' class='btn'>MQTT Tester</a>"
             "<a href='/timers' class='btn'>Timers</a>"
             "<a href='/berry' class='btn'>Berry Scripting</a>"
-            "<a href='/time' class='btn'>Time / NTP</a>"
+            /* System */
+            "<p class='mgrp'>System</p>"
+            "<a href='/settings' class='btn'>Configuration</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
-            /* Reboot is state-changing; promote from GET to POST so it
-             * can't fire from a stray <img> tag on an attacker's page.
-             * Styled to look identical to the old anchor. CSRF token
-             * rides as a hidden form field; submit goes through
-             * confirm() like before. */
+            /* Danger zone */
+            "<p class='mgrp'>Device</p>"
             "<form method='POST' action='/reboot'"
-            " style='display:inline;margin:0;padding:0' "
+            " style='display:inline-block;width:100%%;margin:0;padding:0' "
             "onsubmit=\"return confirm('Restart?')\">"
             "<input type='hidden' name='csrf' value='%s'>"
             "<button type='submit' class='btn bred'>Restart</button>"
