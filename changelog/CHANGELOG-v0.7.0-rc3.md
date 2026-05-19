@@ -3,7 +3,7 @@
 Built: May 13 2026 · SHA-256:
 `2c82609921623a6b1cab3e3b0f992efafe662e9ab25319ad06f168f75fb8f5d8`
 
-Closes Phase 3 of [`plan-ntp-server.md`](plan-ntp-server.md). Plan
+Closes Phase 3 of [`plan-ntp-server.md`](../plan/plan-ntp-server.md). Plan
 acceptance criteria #1–4 are now all green; #5 (`make test-ntp` CI)
 remains deferred to a Phase 0 follow-up.
 

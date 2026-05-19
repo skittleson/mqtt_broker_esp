@@ -95,5 +95,5 @@ unchanged for OTA upgrades. ~15 KB net code added.
 - TZ preset dropdown on `/settings` not added yet — users still hand-type
   POSIX TZ strings (`PST8PDT,M3.2.0,M11.1.0` style). Plan §1.4 polish.
 
-See [`plan-scheduled-publishes.md`](../plan-scheduled-publishes.md) for
+See [`plan-scheduled-publishes.md`](../plan/plan-scheduled-publishes.md) for
 the full design.

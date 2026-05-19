@@ -3,7 +3,7 @@
 Built: May 13 2026 · SHA-256:
 `8570b6b58bc3ab5b9e1c1bedc886315d0d561969ef22dbde095c9d86bd09a08e`
 
-First slice of [`plan-ntp-server.md`](plan-ntp-server.md). Adds an SNTP
+First slice of [`plan-ntp-server.md`](../plan/plan-ntp-server.md). Adds an SNTP
 client + `$SYS/broker/time` publisher + `/api/time` HTTP endpoints + a
 Time (NTP) section in `/settings`. SNTP server (Phase 2), DHCP option 42
 (Phase 3), `/time` portal page (Phase 3), and drift compensation

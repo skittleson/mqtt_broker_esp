@@ -3,7 +3,7 @@
 Built: May 13 2026 · SHA-256:
 `93396b98f5a509e76fb5dbc2a7668be5d7750f46dd932772cef71fbea5da40c5`
 
-Closes Phase 2 of [`plan-ntp-server.md`](plan-ntp-server.md). The broker
+Closes Phase 2 of [`plan-ntp-server.md`](../plan/plan-ntp-server.md). The broker
 now binds UDP :123 and answers SNTPv4 client queries, so any device on
 the same LAN can sync from it. Phases 0 (test harness), 3 (DHCP opt 42 +
 `/time` page), and 4 (drift/manual-set/broadcast) still deferred.

@@ -248,7 +248,7 @@ discovery, anti-amplification, and rate-limit drops.
 - [`docs/architecture.md`](docs/architecture.md) — tasks, cores, memory layout, flash partitions, QoS internals, Ethernet/NAPT, LED states, network modes, scaling past 100 clients
 - [`docs/api.md`](docs/api.md) — all HTTP endpoints, JSON schemas, `$SYS` topics, curl examples
 - [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) — annotated portal tour (desktop + mobile) for every page
-- [`plan-scheduled-publishes.md`](plan-scheduled-publishes.md) — timers design, DST/TZ correctness analysis, 10-year-lifetime rationale
+- [`plan/plan-scheduled-publishes.md`](plan/plan-scheduled-publishes.md) — timers design, DST/TZ correctness analysis, 10-year-lifetime rationale
 - [`docs/timers-ux-audit-v0.8.0.md`](docs/timers-ux-audit-v0.8.0.md) — portal UX audit methodology, baseline screenshots, fix sequencing
 - [`docs/portal-latency-analysis.md`](docs/portal-latency-analysis.md) — measurements behind the 0.6.6 latency work
 - [`docs/qos-persistence-plan.md`](docs/qos-persistence-plan.md) — roadmap for persistent sessions
