@@ -1741,12 +1741,17 @@ static void handle_http_client(int client_fd)
         nvs_settings_get_str("ap_pass", ap_pass, sizeof(ap_pass), "mqtt1234");
         wifi_get_ap_ip_str(ap_ip_info, sizeof(ap_ip_info));
         int ap_pass_is_default = (strcmp(ap_pass, "mqtt1234") == 0);
+        uint8_t ap_enabled_info = nvs_settings_get_u8("ap_enabled", 1);
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Access Point&nbsp;</legend><table>"
+            "<tr><th>Enabled</th><td>%s</td></tr>"
             "<tr><th>AP SSID</th><td>%s</td></tr>"
             "<tr><th>AP Password</th><td>%s</td></tr>"
             "<tr><th>AP IP</th><td>%s</td></tr>"
             "</table></fieldset>",
+            ap_enabled_info
+                ? "<span style='color:#a5d6a7'>yes</span>"
+                : "<span style='color:#ffcc80'>no (auto-enabled if STA fails at boot)</span>",
             ap_ssid,
             ap_pass_is_default
                 ? "<span style='color:#ffcc80'>set (factory default \xe2\x80\x94 change in Configuration)</span>"
@@ -1878,9 +1883,17 @@ static void handle_http_client(int client_fd)
         {
             char ap_ip_val[16] = "";
             wifi_get_ap_ip_str(ap_ip_val, sizeof(ap_ip_val));
+            uint8_t ap_enabled = nvs_settings_get_u8("ap_enabled", 1);
             pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
                 "</fieldset>"
                 "<fieldset><legend>&nbsp;Access Point&nbsp;</legend>"
+                "<p><label style='font-weight:normal'>"
+                "<input type='checkbox' name='ap_enabled' value='1' %s> "
+                "Enable AP (Wi-Fi hotspot)</label></p>"
+                "<p style='color:#888;font-size:0.85em'>"
+                "When unchecked, the SoftAP stays off while STA is connected. "
+                "If STA fails to connect at boot, the AP is auto-enabled as a "
+                "recovery fallback. Takes effect immediately on save.</p>"
                 "<label>AP SSID</label>"
                 "<input type='text' name='ap_ssid' value='%s' placeholder='mqtt-broker' required maxlength='32'>"
                 "<label>AP Password %s</label>"
@@ -1891,6 +1904,7 @@ static void handle_http_client(int client_fd)
                 "<input type='text' name='ap_ip' value='%s' "
                 "pattern='[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' "
                 "title='IPv4 address like 192.168.25.1'>",
+                ap_enabled ? "checked" : "",
                 ap_ssid,
                 ap_pass_is_default
                     ? "<span style='color:#ffcc80'>(factory default \xe2\x80\x94 please change)</span>"
@@ -2148,6 +2162,20 @@ static void handle_http_client(int client_fd)
                 ESP_LOGI(TAG, "Saved AP IP: '%s' (reboot required)", val);
             } else {
                 ESP_LOGW(TAG, "AP IP rejected: invalid format '%s'", val);
+            }
+        }
+
+        /* AP enable/disable — checkbox absent means disabled. Apply immediately
+         * via wifi_set_ap_mode() so the user sees the effect without reboot.
+         * Note: if STA is not currently connected, we leave the runtime state
+         * alone (the AP is the only way the user is reaching the portal). */
+        {
+            uint8_t ap_enabled = (strstr(req.body, "ap_enabled=1") != NULL) ? 1 : 0;
+            uint8_t ap_enabled_prev = nvs_settings_get_u8("ap_enabled", 1);
+            nvs_settings_set_u8("ap_enabled", ap_enabled);
+            ESP_LOGI(TAG, "Saved AP enabled: %d", ap_enabled);
+            if (ap_enabled != ap_enabled_prev && wifi_get_sta_connected()) {
+                wifi_set_ap_mode(ap_enabled);
             }
         }
 

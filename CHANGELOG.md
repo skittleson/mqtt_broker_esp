@@ -2,6 +2,19 @@
 
 Detailed per-release notes live in [`changelog/`](changelog/).
 
+## 0.9.1 — AP enable/disable toggle on /settings
+
+User-controlled checkbox in the Access Point fieldset to keep the SoftAP
+off while the device is on WiFi. Persists in NVS as `mqtt_cfg/ap_enabled`
+(default ON — existing devices see no change after OTA). Applies live
+on save via `wifi_set_ap_mode()`; no reboot required when STA is up.
+
+**Brick safety:** if STA fails to connect at boot, `wifi_connect_sta()`
+still brings the AP up as the recovery fallback regardless of this flag,
+so a bad WiFi password can never lock the operator out of the portal.
+
+Full details: [`changelog/CHANGELOG-v0.9.1.md`](changelog/CHANGELOG-v0.9.1.md).
+
 ## 0.9.0 — Berry scripting runtime (mqtt + http modules, 4-slot manager)
 
 **Berry v1.1.0 embedded as the broker's automation layer.** Scripts run on

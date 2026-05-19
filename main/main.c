@@ -187,12 +187,27 @@ void app_main(void)
     }
 
     /* Start captive portal (for WiFi config via web browser).
-     * Always enable AP so the portal is reachable at the AP IP,
-     * even when STA is connected (AP+STA mode). */
+     * AP enablement is governed by the user's "ap_enabled" preference in NVS
+     * (default: ON, preserves pre-0.8.x behavior). When disabled, the AP only
+     * comes up if STA failed to connect at boot — wifi_connect_sta() already
+     * handled that fallback before we got here. */
     ESP_LOGI(TAG, "Starting captive portal...");
-    if (wifi_get_sta_connected()) {
-        /* STA connected — switch to AP+STA so portal is reachable */
-        wifi_set_ap_mode(1);
+    {
+        uint8_t ap_enabled = 1;
+        nvs_handle_t h;
+        if (nvs_open("mqtt_cfg", NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_u8(h, "ap_enabled", &ap_enabled);
+            nvs_close(h);
+        }
+        if (wifi_get_sta_connected() && ap_enabled) {
+            /* STA connected — switch to AP+STA so portal is reachable on AP too */
+            wifi_set_ap_mode(1);
+        } else if (!wifi_get_sta_connected()) {
+            ESP_LOGI(TAG, "STA not connected — AP fallback active regardless of ap_enabled=%d",
+                     ap_enabled);
+        } else {
+            ESP_LOGI(TAG, "AP disabled by saved config — STA-only mode");
+        }
     }
     portal_start();
     if (!wifi_get_sta_connected()) {

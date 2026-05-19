@@ -67,10 +67,17 @@
  *
  * examples/berry/ added: tasmota_power_state.be (MQTT), tasmota_http_get.be
  * (HTTP GET + JSON parse), README with API quick reference. */
+/* 0.9.1: AP enable/disable checkbox on /settings. New `ap_enabled` u8 in
+ * NVS "mqtt_cfg" (default 1, preserves prior behavior). When unchecked,
+ * the SoftAP stays off while STA is connected; if STA fails to connect
+ * at boot, wifi_connect_sta() still brings the AP up as a recovery
+ * fallback so the device can never be bricked by the toggle. Applies
+ * immediately on save via wifi_set_ap_mode() — no reboot required when
+ * STA is up. /settings (read-only) gains an "Enabled: yes/no" row. */
 #define FW_VERSION_MAJOR  0
 #define FW_VERSION_MINOR  9
-#define FW_VERSION_PATCH  0
-#define FW_VERSION        "0.9.0"
+#define FW_VERSION_PATCH  1
+#define FW_VERSION        "0.9.1"
 #define FW_NAME           "mqtt_broker"
 #define FW_AUTHOR         "Spencer Kittleson"
 /* Footer string rendered at the bottom of every portal page and on the
