@@ -40,10 +40,37 @@
  * FW_FOOTER to version.h; portal page-wrapper and Information page now
  * render "mqtt_broker 0.8.3 by Spencer Kittleson" from the single
  * source of truth. */
+/* 0.9.0: Berry scripting runtime — embed Berry VM as an automation layer.
+ * New components/berry/ vendors Berry v1.1.0. berry_task (CPU 1) owns the
+ * VM; broker fanout calls berry_publish_topic_event() after every PUBLISH.
+ *
+ * Scripting surface: mqtt.subscribe(filter, fn), mqtt.unsubscribe(filter),
+ * mqtt.publish(topic, payload [,qos [,retain]]). All subscriptions run as
+ * callbacks on berry_task; broker_task never stalls on a script.
+ *
+ * Portal /berry: 4 named script slots (berry_s0..s3_{nm,sc,en} in NVS).
+ * Each slot has a label, script body (≤2000 bytes), and enable toggle.
+ * Enabled slots run sequentially in the shared VM on every boot/restart,
+ * in slot order. Legacy single-slot NVS keys (berry_en, berry_script)
+ * are migrated to slot 0 on first boot. Inline Run-once REPL stays in
+ * page, auto-refreshing log pane, trash button to clear a slot.
+ *
+ * Portal UX: main menu regrouped into Network / Broker / System labelled
+ * sections; /berry has Main Menu button; timer Save button fixed
+ * (form id='timer-save' was missing, causing empty POST on arm/repeat).
+ *
+ * http module (P4): http.get(url [,timeout_ms]) and
+ * http.post(url, body [,content_type [,timeout_ms]]) — both synchronous
+ * on berry_task, return [status_code, body_string]. JSON responses parsed
+ * with json.load(r[1]); plain text used as-is. Verified against Tasmota
+ * HTTP API at 192.168.22.238.
+ *
+ * examples/berry/ added: tasmota_power_state.be (MQTT), tasmota_http_get.be
+ * (HTTP GET + JSON parse), README with API quick reference. */
 #define FW_VERSION_MAJOR  0
-#define FW_VERSION_MINOR  8
-#define FW_VERSION_PATCH  3
-#define FW_VERSION        "0.8.3"
+#define FW_VERSION_MINOR  9
+#define FW_VERSION_PATCH  0
+#define FW_VERSION        "0.9.0"
 #define FW_NAME           "mqtt_broker"
 #define FW_AUTHOR         "Spencer Kittleson"
 /* Footer string rendered at the bottom of every portal page and on the

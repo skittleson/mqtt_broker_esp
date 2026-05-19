@@ -1613,8 +1613,6 @@ static void handle_http_client(int client_fd)
             "<a href='/settings' class='btn'>Configuration</a>"
             "<a href='/information' class='btn'>Information</a>"
             "<a href='/update' class='btn bgry'>Firmware Upgrade</a>"
-            /* Danger zone */
-            "<p class='mgrp'>Device</p>"
             "<form method='POST' action='/reboot'"
             " style='display:inline-block;width:100%%;margin:0;padding:0' "
             "onsubmit=\"return confirm('Restart?')\">"

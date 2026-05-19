@@ -23,7 +23,7 @@ No cloud. No Pi. No Docker. Plug it in.
 Most MQTT setups need a Raspberry Pi, a cloud account, or a Linux box running
 Mosquitto. This puts the **entire broker on an ESP32-S3**: 100 concurrent
 clients, QoS 0/1, retained messages, OTA updates, a Tasmota-style web portal,
-**scheduled publishes (Tasmota-style timers)**, and an SNTP server — all on
+**scheduled publishes**, **Berry scripting**, and an SNTP server — all on
 an 8 MB chip you can power from a USB battery.
 
 Built for home automation, IoT sensor fleets, and edge deployments that need a
@@ -81,6 +81,7 @@ curl -u user:pass -H "X-CSRF-Token: $TOKEN" -H 'Content-Type: application/json' 
 - **mDNS** — reachable as `<hostname>.local`, advertises `_mqtt._tcp`, `_http._tcp`, `_ntp._udp`
 - **WS2812 status LED** — visual boot/connect/run/AP state
 - **No external MQTT library** — single C codebase, the only non-IDF dep is `espressif/led_strip`
+- **Berry scripting** — embedded Berry v1.1.0 VM on CPU 1 (see below)
 
 <details>
 <summary>Use cases</summary>
@@ -122,28 +123,66 @@ needed for [Ethernet gateway mode](docs/architecture.md#ethernet-gateway-w5500).
 - **`/settings`** — broker port, auth, buffer size, retain, AP credentials, hostname, NAPT, NTP, **timezone dropdown** (~40 IANA presets + free-form POSIX TZ). **Save & Reboot** with confirm dialog and countdown page
 - **`/update`** — file upload, URL fetch, rollback button showing the other partition's version
 - **`/time`** — live clock, NTP client+server status, recent SNTP clients, force-resync
-- **JSON API** — `/api/status`, `/api/clients`, `/api/time`, `/api/timers` (GET list, PUT/DELETE per slot — CSRF-protected), `/api/ping` (open, for liveness)
+- **`/berry`** — Berry scripting manager (see [Berry scripting](#berry-scripting) below)
+- **JSON API** — `/api/status`, `/api/clients`, `/api/time`, `/api/timers` (GET list, PUT/DELETE per slot — CSRF-protected), `/api/ping` (open, for liveness), `/api/berry/status`, `/api/berry/log`
 
 Full endpoint and JSON reference: [`docs/api.md`](docs/api.md).
+
+## Berry scripting
+
+The broker embeds **Berry v1.1.0** as a lightweight automation layer.
+Scripts run on a dedicated FreeRTOS task (CPU 1) and never block the
+broker's select() loop.
+
+**`/berry`** — 4 named script slots, each with a label, enable toggle, and
+up to 2,000 bytes of Berry code. Enabled slots run in order on every
+boot/restart. Edit inline, run one-off snippets in the REPL pane.
+
+### Available modules
+
+```berry
+# Subscribe to MQTT topics
+mqtt.subscribe("sensor/+", def(topic, payload)
+  print(topic + " -> " + payload)
+end)
+mqtt.publish("status/broker", "online")
+
+# Make HTTP requests — returns [status_code, body_string]
+import json
+var r = http.get("http://192.168.1.100/api/status")
+if r[0] == 200
+  var obj = json.load(r[1])       # parse JSON body
+  print(str(obj["power"]))
+end
+
+var r2 = http.post("http://host/webhook", "payload text")
+print(r2[1])                      # plain text response as-is
+```
+
+**Supported response formats:** JSON (`json.load(r[1])`) or plain text
+(`r[1]` as-is). Status `-1` with an error description on network failure.
+
+See [`examples/berry/`](examples/berry/) for copy-paste-ready scripts and
+the full API quick-reference.
 
 ## Configuration
 
 All settings persist to NVS and survive reboots.
 
-| Setting           | Default                    | Notes                                                |
-| ----------------- | -------------------------- | ---------------------------------------------------- |
-| MQTT port         | 1883                       | 1–65535, takes effect after reboot                   |
-| Auth user/pass    | _(empty)_                  | Empty = open broker                                  |
-| Buffer size       | 16,384                     | 1,024–65,536, per-client recv + shared send          |
-| Retain enable     | on                         | Off rejects all retain flags                         |
-| Retain TTL        | 168 h                      | 0 = never expire                                     |
-| AP SSID / pass    | `mqtt-broker` / `mqtt1234` | WPA2-PSK                                             |
-| AP IP             | `192.168.25.1`             | Also compile-time                                    |
-| Hostname          | `mqtt_broker`              | DHCP + mDNS (`<hostname>.local`)                     |
-| NAPT              | on                         | Ethernet builds only, toggles live                   |
-| NTP client/server | on / on                    | Up to 3 upstreams, configurable poll interval        |
+| Setting           | Default                    | Notes                                                                             |
+| ----------------- | -------------------------- | --------------------------------------------------------------------------------- |
+| MQTT port         | 1883                       | 1–65535, takes effect after reboot                                                |
+| Auth user/pass    | _(empty)_                  | Empty = open broker                                                               |
+| Buffer size       | 16,384                     | 1,024–65,536, per-client recv + shared send                                       |
+| Retain enable     | on                         | Off rejects all retain flags                                                      |
+| Retain TTL        | 168 h                      | 0 = never expire                                                                  |
+| AP SSID / pass    | `mqtt-broker` / `mqtt1234` | WPA2-PSK                                                                          |
+| AP IP             | `192.168.25.1`             | Also compile-time                                                                 |
+| Hostname          | `mqtt_broker`              | DHCP + mDNS (`<hostname>.local`)                                                  |
+| NAPT              | on                         | Ethernet builds only, toggles live                                                |
+| NTP client/server | on / on                    | Up to 3 upstreams, configurable poll interval                                     |
 | Timezone          | `UTC0`                     | POSIX TZ string (preset dropdown + free-form input); DST handled by `localtime_r` |
-| Timers            | _(empty)_                  | 16 slots in NVS “mqtt_cfg”/“timers”, JSON blob (schema `v=1`) |
+| Timers            | _(empty)_                  | 16 slots in NVS “mqtt_cfg”/“timers”, JSON blob (schema `v=1`)                     |
 
 Compile-time tunables (max clients, in-flight slots, retry timing, LED GPIO,
 SPI pins, …) live in `main/mqtt_broker.h`, `main/Kconfig.projbuild`, and

@@ -2,6 +2,33 @@
 
 Detailed per-release notes live in [`changelog/`](changelog/).
 
+## 0.9.0 — Berry scripting runtime (mqtt + http modules, 4-slot manager)
+
+**Berry v1.1.0 embedded as the broker's automation layer.** Scripts run on
+a dedicated FreeRTOS task (CPU 1) and never block the broker's select() loop.
+
+**`mqtt` module:** `subscribe(filter, fn)` / `unsubscribe(filter)` /
+`publish(topic, payload)`. Callbacks fire when matching PUBLISH messages
+flow through the broker — no TCP loopback, no extra client.
+
+**`http` module:** `http.get(url)` / `http.post(url, body)` — both return
+`[status_code, body_string]`. Parse JSON responses with `json.load(r[1])`;
+use `r[1]` as-is for plain text. Verified live against Tasmota HTTP API.
+
+**4-slot script manager** on `/berry`: named slots with inline accordion
+editor, enable toggle, trash button, Run-once REPL with inline result.
+Legacy `berry_script` NVS key migrated to slot 0 on first boot.
+
+**Portal UX:** main menu regrouped into NETWORK / BROKER / SYSTEM labelled
+sections. Two bug fixes: `/berry` Edit button (wrong style check), timer
+Save button (missing form `id`).
+
+**`examples/berry/`:** `tasmota_power_state.be` (MQTT) and
+`tasmota_http_get.be` (HTTP GET + JSON parse) with README and API reference.
+
++116 KB binary (dominated by Berry VM, pre-budgeted in plan-berry-scripting.md).
+Details: [`changelog/CHANGELOG-v0.9.0.md`](changelog/CHANGELOG-v0.9.0.md).
+
 ## 0.8.3 — Author attribution in portal footer
 
 Footer on every portal page and the Information page's Firmware row now
