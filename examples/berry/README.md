@@ -16,6 +16,7 @@ Copy the contents of any `.be` file into a slot on the `/berry` page.
 |------|--------------|
 | [`tasmota_power_state.be`](tasmota_power_state.be) | Subscribes to a Tasmota device's MQTT power state topic and prints ON/OFF whenever it changes. Sends a query on boot so the current state appears immediately in the log. |
 | [`tasmota_http_get.be`](tasmota_http_get.be) | Queries a Tasmota device's power state via HTTP GET, parses the JSON response body, and prints the result. Demonstrates the two supported response formats: JSON and plain text. |
+| [`device_online_tracker.be`](device_online_tracker.be) | Tracks device online/offline state by subscribing to MQTT LWT (Last Will & Testament) topics. Handles both Tasmota (`tele/+/LWT`) and ESPHome (`+/status`) conventions, ignores duplicate-state retained replays, and emits transition events to `$broker/devices/event`. |
 
 ## API quick reference
 
