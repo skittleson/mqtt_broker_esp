@@ -1,0 +1,39 @@
+From: mqtt_broker_esp <local>
+Subject: [PATCH] berry: add bntvmodule.init field for macro source-compat
+
+Upstream berry v1.1.0 has an inconsistency: the `be_define_native_module`
+macro initializes a `.init` field that isn't declared in `struct bntvmodule`.
+Tasmota's fork defines it; we mirror that here. The field is never read
+by Berry's core (module init lookup is by Berry-level member name in
+be_module.c), so the C-side callback type doesn't matter — `void *` is
+fine and avoids dragging extra typedefs into the public header.
+
+See components/berry/README.md for refresh procedure.
+---
+diff --git a/src/berry.h b/src/berry.h
+index 0000000..0000000 100644
+--- a/src/berry.h
++++ b/src/berry.h
+@@ -166,12 +166,21 @@ typedef struct bntvmodobj {
+ #endif
+ } bntvmodobj;
+ 
+-/* native module object */
++/* native module object
++ *
++ * NOTE (mqtt_broker_esp local patch): upstream berry v1.1.0 has an
++ * inconsistency — the `be_define_native_module` macro initializes a
++ * `.init` field that isn't declared in this struct. Tasmota's fork
++ * defines it; we mirror that here. The field is never read by Berry's
++ * core (module init lookup is by Berry-level member name in be_module.c),
++ * so the C-side callback type doesn't matter. See components/berry/README.md.
++ */
+ typedef struct bntvmodule {
+     const char *name; /* native module name */
+     const bntvmodobj *attrs; /* native module attributes */
+     size_t size; /* native module attribute count */
+     const struct bmodule *module; /* const module object */
++    void *init; /* unused; kept for source-compat with macro */
+ } bntvmodule;
+ 
+ /* native class object */

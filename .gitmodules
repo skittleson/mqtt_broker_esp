@@ -1,0 +1,4 @@
+[submodule "components/berry/upstream"]
+	path = components/berry/upstream
+	url = https://github.com/berry-lang/berry.git
+	branch = master
