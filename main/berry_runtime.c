@@ -9,6 +9,7 @@
  */
 #include "berry_runtime.h"
 #include "berry_mod_mqtt.h"
+#include "berry_mod_http.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -407,6 +408,7 @@ static void vm_construct(void)
     s_topic_subs_count = 0;
     install_subs_list();
     berry_mod_mqtt_register(s_vm);  /* P3: register `mqtt` global module */
+    berry_mod_http_register(s_vm);  /* P4: register `http` global module */
     log_event("VM up, free heap=%u",
               (unsigned)esp_get_free_heap_size());
 }
