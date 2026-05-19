@@ -14,7 +14,9 @@ No cloud. No Pi. No Docker. Plug it in.
 
 [Quick start](#quick-start) · [Features](#features) · [Docs](#documentation) · [Building](#building-from-source) · [Testing](#testing)
 
-<img src="docs/screenshots/dashboard.png" alt="Web portal dashboard" width="720">
+<a href="docs/SCREENSHOTS.md"><img src="docs/screenshots/demo.gif" alt="Animated portal tour — click for the full screenshot gallery" width="720"></a>
+
+<sub><a href="docs/SCREENSHOTS.md">Full portal tour →</a></sub>
 
 </div>
 
@@ -116,6 +118,8 @@ needed for [Ethernet gateway mode](docs/architecture.md#ethernet-gateway-w5500).
   &nbsp;
   <img src="docs/screenshots/timers/list_desktop.png" alt="Timers list with master pill + 3-state On indicator + Rep column" width="380">
 </p>
+
+<sub align="center"><a href="docs/SCREENSHOTS.md">→ Full portal tour with desktop + mobile screenshots of every page</a></sub>
 
 - **`/`** — dashboard with WiFi/broker stats, MQTT auth state, device info
 - **`/clients`** — live MQTT clients (ID, IP, uptime, subs, in-flight, published, keepalive) + WiFi AP clients (MAC, RSSI). Polls `/api/clients` every 3 s, pause button, tab-hidden backoff
@@ -243,6 +247,7 @@ discovery, anti-amplification, and rate-limit drops.
 
 - [`docs/architecture.md`](docs/architecture.md) — tasks, cores, memory layout, flash partitions, QoS internals, Ethernet/NAPT, LED states, network modes, scaling past 100 clients
 - [`docs/api.md`](docs/api.md) — all HTTP endpoints, JSON schemas, `$SYS` topics, curl examples
+- [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) — annotated portal tour (desktop + mobile) for every page
 - [`plan-scheduled-publishes.md`](plan-scheduled-publishes.md) — timers design, DST/TZ correctness analysis, 10-year-lifetime rationale
 - [`docs/timers-ux-audit-v0.8.0.md`](docs/timers-ux-audit-v0.8.0.md) — portal UX audit methodology, baseline screenshots, fix sequencing
 - [`docs/portal-latency-analysis.md`](docs/portal-latency-analysis.md) — measurements behind the 0.6.6 latency work
