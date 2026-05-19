@@ -3487,7 +3487,7 @@ static void handle_http_client(int client_fd)
         }
         pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
             "<fieldset><legend>&nbsp;Timer %d&nbsp;</legend>"
-            "<form method='POST' action='/timers/save'>"
+            "<form id='timer-save' method='POST' action='/timers/save'>"
             "<input type='hidden' name='csrf' value='%s'>"
             "<input type='hidden' name='n' value='%d'>"
             "<label>Label</label>"
@@ -3859,6 +3859,8 @@ static void handle_http_client(int client_fd)
      * intercept above (they don't reach this dispatch table). */
     } else if (strcmp(req.path, "/berry") == 0 && req.method == REQ_GET) {
         int pos = (int)portal_berry_render_page(body, PAGE_BUF_SIZE, csrf_token_hex());
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+            "<br><a href='/' class='btn'>Main Menu</a>");
         http_send_page(client_fd, body, (size_t)pos);
 
     } else if (strcmp(req.path, "/berry/restart") == 0 && req.method == REQ_POST) {
