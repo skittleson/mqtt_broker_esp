@@ -7,6 +7,7 @@ No cloud. No Pi. No Docker. Plug it in.
 
 [![ESP-IDF v5.5](https://img.shields.io/badge/ESP--IDF-v5.5-blue?style=flat-square)](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/get-started/)
 [![MQTT 3.1.1](https://img.shields.io/badge/MQTT-3.1.1-orange?style=flat-square)](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html)
+![From scratch in C](https://img.shields.io/badge/built-from%20scratch%20in%20C-blueviolet?style=flat-square)
 ![QoS 0/1](https://img.shields.io/badge/QoS-0%20%2F%201-green?style=flat-square)
 ![100 clients](https://img.shields.io/badge/clients-100%20max-green?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen?style=flat-square)](LICENSE)
@@ -22,14 +23,59 @@ No cloud. No Pi. No Docker. Plug it in.
 
 ---
 
-Most MQTT setups need a Raspberry Pi, a cloud account, or a Linux box running
-Mosquitto. This puts the **entire broker on an ESP32-S3**: 100 concurrent
-clients, QoS 0/1, retained messages, OTA updates, a Tasmota-style web portal,
-**scheduled publishes**, **Berry scripting**, and an SNTP server — all on
-an 8 MB chip you can power from a USB battery.
+Most MQTT setups need a Raspberry Pi, a cloud account, or a Linux box
+running Mosquitto. This puts the **entire broker on an ESP32-S3**, written
+from scratch in **~2,800 lines of C**. No external MQTT library, just lwIP
+BSD sockets. 100 concurrent clients, QoS 0/1, retained messages, OTA
+updates, a Tasmota-style web portal, **scheduled publishes**, **Berry
+scripting**, and an SNTPv4 server. All on an 8 MB chip you can power from
+a USB battery.
 
-Built for home automation, IoT sensor fleets, and edge deployments that need a
-local broker with zero maintenance.
+## Why I built this
+
+I built this for a **10-year (or longer) deployment lifetime on $10 of
+silicon**. The kind of thing you screw to a wall, plug in, and walk away
+from for a decade. No telemetry. No phone-home updates. No hard-coded
+policy that governments can change out from under it... DST rules, NTP
+upstreams, regulatory bands all live in user-editable NVS, not in the
+firmware. Storage decisions get sanity-checked against NVS wear... a
+write-per-PUBLISH would shred the flash in months, so the retained store
+and in-flight tables stay in PSRAM.
+
+That goal forced a few hard choices. No external MQTT library. The
+broker is ~2,800 lines of custom C against lwIP BSD sockets. I keep
+needing a small local MQTT broker in places where dragging a Raspberry
+Pi doesn't fit the shape of the problem... trade shows, ag, isolated
+IoT VLANs at home, the back of a truck. Pi means an SD card to corrupt,
+an OS to update, and ~3W of idle draw. Cloud broker means an account,
+an internet connection, and latency. Neither shape fits.
+
+### How it gets built and stays honest
+
+I used Claude Code heavily to write this. That's not interesting on its
+own. What keeps it honest is **~129 pytest assertions running against a
+live ESP32 on every release**. Protocol conformance, wildcards, retained
+binary payloads with MD5 verification, 50-client concurrency, NTP server
+behavior. The tests run on real hardware, not a host build, because a
+broker that passes on x86 tells you nothing about whether it survives a
+flaky 2.4GHz radio at the back of a truck. AI accelerates. Tests on real
+hardware are the only thing that decides whether the code is right.
+
+Built for home automation, IoT sensor fleets, and edge deployments where
+"plug it in and forget" is the actual requirement.
+
+### What's surprising on a microcontroller
+
+<table>
+<tr>
+<td align="center" width="33%"><b>Scheduled publishes</b><br><sub>16 Tasmota-style timer slots. "Lights on at 17:00 weekdays" with no Node-RED, no cron, no Pi. DST-aware via POSIX TZ.</sub></td>
+<td align="center" width="33%"><b>Berry scripting</b><br><sub>Embedded Berry v1.1.0 VM on CPU 1. Subscribe to MQTT topics, fire HTTP webhooks, count events. 4 named slots in NVS.</sub></td>
+<td align="center" width="33%"><b>SNTPv4 server</b><br><sub>Your isolated IoT VLAN gets a time source on UDP :123, advertised over mDNS. Drift compensation while free-running.</sub></td>
+</tr>
+<tr>
+<td align="center" width="33%"><b>Echo detection</b><br><sub>Per-topic publish-frequency tracking with sliding window. Detects feedback loops (N publishes in window) and exposes them via /api/echo-detected + dashboard reset button.</sub></td>
+</tr>
+</table>
 
 ## Quick start
 
@@ -75,6 +121,7 @@ curl -u user:pass -H "X-CSRF-Token: $TOKEN" -H 'Content-Type: application/json' 
 - **Retained messages** with configurable TTL, PSRAM-backed, FIFO eviction at 80% PSRAM
 - **Wildcards** — `+`, `#`, and `$SYS` topic protection per spec §4.7
 - **Authentication** — optional MQTT username/password + Basic Auth on the portal
+- **Echo detection** — tracks per-topic publish frequency and detects feedback loops (configurable count + sliding window). Exposed via `/api/echo-detected` + reset button on the dashboard. [How it works →](https://docodethatmatters.com/the-infinite-echo-state-mirror-bug/)
 - **Web portal** — Tasmota-style dark UI: dashboard, live `/clients`, settings, OTA, firmware rollback
 - **Scheduled publishes** — 16 Tasmota-style timer slots (Arm / Repeat / HH:MM local / day mask / window jitter / publish topic+payload+QoS+retain). DST-aware via POSIX TZ (preset dropdown for ~40 common zones). Persists in NVS. Per-slot test-fire and master pause.
 - **OTA updates** — file upload, URL fetch, dual partitions, manual rollback button
@@ -121,14 +168,14 @@ needed for [Ethernet gateway mode](docs/architecture.md#ethernet-gateway-w5500).
 
 <sub align="center"><a href="docs/SCREENSHOTS.md">→ Full portal tour with desktop + mobile screenshots of every page</a></sub>
 
-- **`/`** — dashboard with WiFi/broker stats, MQTT auth state, device info
+- **`/`** — dashboard with WiFi/broker stats, MQTT auth state, device info, echo detection widget
 - **`/clients`** — live MQTT clients (ID, IP, uptime, subs, in-flight, published, keepalive) + WiFi AP clients (MAC, RSSI). Polls `/api/clients` every 3 s, pause button, tab-hidden backoff
 - **`/timers`** — 16 scheduled-publish slots. List view shows armed state (● / ◐ / —), repeat icon, time, day mask, topic. Edit form has Tasmota-parity fields (Arm / Repeat / Time / Window / Days / Topic / Payload / QoS / Retain) plus a live `Next fire: today at 17:00 (in 4h 12m)` line. Master pause pill in the header. Mobile collapses to stacked cards below 600 px
-- **`/settings`** — broker port, auth, buffer size, retain, AP credentials, hostname, NAPT, NTP, **timezone dropdown** (~40 IANA presets + free-form POSIX TZ). **Save & Reboot** with confirm dialog and countdown page
+- **`/settings`** — broker port, auth, buffer size, retain, AP credentials, hostname, NAPT, NTP, echo detection config, **timezone dropdown** (~40 IANA presets + free-form POSIX TZ). **Save & Reboot** with confirm dialog and countdown page
 - **`/update`** — file upload, URL fetch, rollback button showing the other partition's version
 - **`/time`** — live clock, NTP client+server status, recent SNTP clients, force-resync
 - **`/berry`** — Berry scripting manager (see [Berry scripting](#berry-scripting) below)
-- **JSON API** — `/api/status`, `/api/clients`, `/api/time`, `/api/timers` (GET list, PUT/DELETE per slot — CSRF-protected), `/api/ping` (open, for liveness), `/api/berry/status`, `/api/berry/log`
+- **JSON API** — `/api/status`, `/api/clients`, `/api/time`, `/api/timers` (GET list, PUT/DELETE per slot — CSRF-protected), `/api/echo-detected` (GET), `/api/echo-reset` (POST — CSRF-protected), `/api/ping` (open, for liveness), `/api/berry/status`, `/api/berry/log`
 
 Full endpoint and JSON reference: [`docs/api.md`](docs/api.md).
 
@@ -187,6 +234,7 @@ All settings persist to NVS and survive reboots.
 | NTP client/server | on / on                    | Up to 3 upstreams, configurable poll interval                                     |
 | Timezone          | `UTC0`                     | POSIX TZ string (preset dropdown + free-form input); DST handled by `localtime_r` |
 | Timers            | _(empty)_                  | 16 slots in NVS “mqtt_cfg”/“timers”, JSON blob (schema `v=1`)                     |
+| Echo detection    | on                         | Configurable count threshold (1–64) and sliding window (1–3600 s)                 |
 
 Compile-time tunables (max clients, in-flight slots, retry timing, LED GPIO,
 SPI pins, …) live in `main/mqtt_broker.h`, `main/Kconfig.projbuild`, and
