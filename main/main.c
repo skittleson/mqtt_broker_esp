@@ -11,6 +11,7 @@
 #include "ntp.h"
 #include "csrf.h"
 #include "timers.h"
+#include "echo_detect.h"
 #include "berry_runtime.h"
 #include "led_strip.h"
 #include "mdns.h"
@@ -282,6 +283,11 @@ void app_main(void)
             }
         }
     }
+
+    /* Initialize echo detection (reads NVS config, allocates PSRAM state).
+     * Must come before broker_start() — the broker_task starts immediately
+     * and will process publishes before we return. */
+    echo_init();
 
     /* Start MQTT broker */
     ESP_LOGI(TAG, "Starting MQTT broker...");

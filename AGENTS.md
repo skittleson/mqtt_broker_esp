@@ -110,11 +110,11 @@ CHANGELOG.md        Top-level summary that points at changelog/*.
 Read-write zones with their owners. Do not write keys outside an
 established namespace without updating this table.
 
-| Namespace  | Owner          | Notable keys                                                  |
-| ---------- | -------------- | ------------------------------------------------------------- |
+| Namespace  | Owner          | Notable keys                                                                                                                                                                |
+| ---------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mqtt_cfg` | portal.c       | `hostname`, `mqtt_port`, `auth_user`, `auth_pass`, `buf_size`, `retain_en`, `retain_ttl`, `ap_ssid`, `ap_pass`, `ap_ip`, `napt_en`, `timers` (JSON blob, owned by timers.c) |
-| `ntp`      | ntp.c          | `enabled`, `srv_enabled`, `upstream_0..2`, `poll_s`, `tz`, `accept_set` |
-| `wifi`     | wifi_connect.c | `ssid`, `password`                                            |
+| `ntp`      | ntp.c          | `enabled`, `srv_enabled`, `upstream_0..2`, `poll_s`, `tz`, `accept_set`                                                                                                     |
+| `wifi`     | wifi_connect.c | `ssid`, `password`                                                                                                                                                          |
 
 **The POSIX TZ string lives in `ntp/tz`**, not `mqtt_cfg`. All consumers
 (portal, timers, NTP server, `$SYS/broker/time`) read it via the same
@@ -250,7 +250,7 @@ gh auth setup-git    # refresh git's credential helper
 if (...)` chain. To add a new route:
 
 1. Add the `else if (strcmp(req.path, "/your-path") == 0 && req.method
-   == REQ_GET)` arm before the `/* ============ 404 ============ */`
+== REQ_GET)` arm before the `/* ============ 404 ============ */`
    sentinel comment.
 2. Render via `snprintf(body + pos, PAGE_BUF_SIZE - pos, ...)`
    accumulator pattern; end with `http_send_page(client_fd, body, pos)`
@@ -307,12 +307,12 @@ emit unescaped `t.topic` or `t.label` into JSON.
 
 Track every commit's binary delta. Recent baselines:
 
-| Tag    | `mqtt_broker.bin` | OTA slot free |
-| ------ | ----------------- | ------------- |
-| 0.7.2  | ~1.13 MB          | 72%           |
-| 0.8.0  | 0x11ec20 (1.17 MB)| 72%           |
-| 0.8.1  | 0x11f100 (+1.2 KB)| 72%           |
-| 0.8.2  | 0x120520 (+5.0 KB)| 72%           |
+| Tag   | `mqtt_broker.bin`  | OTA slot free |
+| ----- | ------------------ | ------------- |
+| 0.7.2 | ~1.13 MB           | 72%           |
+| 0.8.0 | 0x11ec20 (1.17 MB) | 72%           |
+| 0.8.1 | 0x11f100 (+1.2 KB) | 72%           |
+| 0.8.2 | 0x120520 (+5.0 KB) | 72%           |
 
 OTA partition is 4 MB so there's headroom, but **a single commit
 adding > 20 KB needs justification in the commit message**.
@@ -362,7 +362,7 @@ Before tagging a release, the following must pass:
    firmware and `/api/ping` returns within ~12 seconds.
 3. **Smoke-test the new surface** via curl or the portal UI. For
    API additions: success path + at least one validation-error path
-   + missing-CSRF rejection.
+   - missing-CSRF rejection.
 4. **Re-capture screenshots** if any UI rendered differently.
    `PORTAL_URL=... PORTAL_AUTH=... python3 tools/capture_*.py`. Commit
    the PNG diffs.
@@ -382,7 +382,7 @@ also run a manual stress test via `stress_test.py` and watch
    `spencerkittleson` (personal) and `skittleson` (the repo owner). The
    remote is private under `skittleson`. If `git push` returns
    `Repository not found`, run `gh auth switch --user skittleson &&
-   gh auth setup-git`.
+gh auth setup-git`.
 2. **LSP / IDE warnings about `-mlongcalls`, `-mdisable-hardware-atomics`,
    `-fno-shrink-wrap`** are harmless. Those are Xtensa toolchain flags
    that the host's clang LSP doesn't understand; the real Xtensa
@@ -402,7 +402,7 @@ also run a manual stress test via `stress_test.py` and watch
    `git status` may show a CHANGELOG-vX.Y.Z.md modified that you didn't
    intend to. `git checkout -- <file>` to revert before committing.
 7. **The base portal CSS sets `button { width:100%; line-height:2.4rem;
-   font-size:1.2rem }`** — any inline pill / small button needs
+font-size:1.2rem }`** — any inline pill / small button needs
    `width:auto !important`, `line-height:1.6 !important` to override.
    See `.tmaster` in `portal.c` for the canonical override block.
 8. **`req.path` is stripped of `?query` before dispatch.** Use
@@ -421,15 +421,15 @@ also run a manual stress test via `stress_test.py` and watch
 
 ## 10. Quick reference
 
-| Task                                         | Command                                                       |
-| -------------------------------------------- | ------------------------------------------------------------- |
-| Enter IDF env                                | `source $IDF_PATH/export.sh`                                  |
-| Build                                        | `idf.py build`                                                |
-| Deploy via OTA                               | `PORTAL_AUTH=support:dockyard make ota`                       |
-| Check live version                           | `curl -s -u support:dockyard $URL/api/status \| jq .firmware` |
-| Capture portal screenshots                   | `PORTAL_URL=... PORTAL_AUTH=... python3 tools/capture_portal.py` |
-| Capture /timers screenshots                  | `python3 tools/capture_timers.py` (env vars same as above)    |
-| Run integration tests                        | `BROKER_AUTH=... make test`                                   |
-| Print current firmware version               | `make fmt-version`                                            |
-| Switch gh account                            | `gh auth switch --user skittleson && gh auth setup-git`       |
-| Get CSRF token (for scripted POST/PUT/DELETE)| `curl -s -u $AUTH $URL/api/csrf \| jq -r .token`              |
+| Task                                          | Command                                                          |
+| --------------------------------------------- | ---------------------------------------------------------------- |
+| Enter IDF env                                 | `source $IDF_PATH/export.sh`                                     |
+| Build                                         | `idf.py build`                                                   |
+| Deploy via OTA                                | `PORTAL_AUTH=support:dockyard make ota`                          |
+| Check live version                            | `curl -s -u support:dockyard $URL/api/status \| jq .firmware`    |
+| Capture portal screenshots                    | `PORTAL_URL=... PORTAL_AUTH=... python3 tools/capture_portal.py` |
+| Capture /timers screenshots                   | `python3 tools/capture_timers.py` (env vars same as above)       |
+| Run integration tests                         | `BROKER_AUTH=... make test`                                      |
+| Print current firmware version                | `make fmt-version`                                               |
+| Switch gh account                             | `gh auth switch --user skittleson && gh auth setup-git`          |
+| Get CSRF token (for scripted POST/PUT/DELETE) | `curl -s -u $AUTH $URL/api/csrf \| jq -r .token`                 |

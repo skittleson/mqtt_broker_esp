@@ -12,7 +12,7 @@ mqtt_broker 0.8.3 by Spencer Kittleson
 
 - New `FW_AUTHOR` and `FW_FOOTER` macros in `main/version.h`.
   `FW_FOOTER` is a compile-time string-literal concat of `FW_NAME " "
-  FW_VERSION " by " FW_AUTHOR`, so future bumps update the footer
+FW_VERSION " by " FW_AUTHOR`, so future bumps update the footer
   automatically.
 - Two render sites in `main/portal.c` (the page-wrapper footer and the
   Firmware row in `/information`) updated to use `FW_FOOTER` instead of

@@ -74,10 +74,14 @@
  * fallback so the device can never be bricked by the toggle. Applies
  * immediately on save via wifi_set_ap_mode() — no reboot required when
  * STA is up. /settings (read-only) gains an "Enabled: yes/no" row. */
+/* 0.9.2: Echo detection — detects per-topic publish loops (N publishes
+ * within M seconds). State is PSRAM-backed, in-memory only. Config
+ * (echo_en, echo_count, echo_window) in NVS "mqtt_cfg". Dashboard
+ * widget on /status, /api/echo-detected endpoint, /api/echo-reset. */
 #define FW_VERSION_MAJOR  0
 #define FW_VERSION_MINOR  9
-#define FW_VERSION_PATCH  1
-#define FW_VERSION        "0.9.1"
+#define FW_VERSION_PATCH  2
+#define FW_VERSION        "0.9.2"
 #define FW_NAME           "mqtt_broker"
 #define FW_AUTHOR         "Spencer Kittleson"
 /* Footer string rendered at the bottom of every portal page and on the

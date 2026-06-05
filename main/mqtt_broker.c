@@ -24,6 +24,7 @@
 #include "mqtt_parser.h"
 #include "ntp.h"  /* ntp_is_synced(), ntp_now_us() for $SYS/broker/time */
 #include "berry_runtime.h"  /* berry_publish_topic_event(), berry_has_topic_subs() */
+#include "echo_detect.h"  /* echo_track() for echo loop detection */
 
 #include <string.h>
 #include <errno.h>
@@ -1141,6 +1142,10 @@ static void handle_publish_internal(const char *topic, uint16_t topic_len,
     if (berry_has_topic_subs()) {
         berry_publish_topic_event(topic, topic_len, payload, payload_len);
     }
+
+    /* Echo detection: track publish per-topic. Non-blocking, never fails
+     * in a way that affects real-client delivery. */
+    echo_track(topic, topic_len);
 }
 
 static void handle_publish(int idx, const uint8_t *pkt, size_t pkt_len)

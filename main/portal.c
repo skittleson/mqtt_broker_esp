@@ -18,6 +18,7 @@
 #include "mqtt_broker.h"
 #include "wifi_connect.h"
 #include "ntp.h"
+#include "echo_detect.h"
 #include "version.h"
 #include "csrf.h"
 #include "timers.h"
@@ -1710,7 +1711,25 @@ static void handle_http_client(int client_fd)
             ttl_str,
             stats.buf_size / 1024,
             up_h, up_m, up_s,
-            (unsigned long)(stats.free_heap / 1024));
+             (unsigned long)(stats.free_heap / 1024));
+
+        /* Echo detection status */
+        {
+            echo_detected_list_t list;
+            echo_get_detected(&list);
+            if (list.count > 0) {
+                pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                    "<fieldset><legend>&nbsp;Echo Detection&nbsp;</legend>"
+                    "<p style='color:#ffcc80'>%d detected</p>"
+                    "<form method='POST' action='/api/echo-reset' style='display:inline;margin:0'>"
+                    "<input type='hidden' name='csrf' value='%s'>"
+                    "<button type='submit' style='background:#7a2222;color:#ffb0b0;border:0;"
+                    "padding:4px 12px;border-radius:0.3rem;cursor:pointer;font-size:0.85em'>"
+                    "Reset</button>"
+                    "</form></fieldset>",
+                    list.count, csrf_token_hex());
+            }
+        }
 
         /* MQTT auth status */
         char auth_user[65] = "";
@@ -2059,6 +2078,28 @@ static void handle_http_client(int client_fd)
                 accept_set ? "checked" : "");
         }
 
+        /* Echo detection settings */
+        {
+            uint16_t echo_count = echo_get_min_count();
+            uint16_t echo_window = echo_get_window_sec();
+            bool echo_enabled = echo_is_enabled();
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "</fieldset>"
+                "<fieldset><legend>&nbsp;Echo Detection&nbsp;</legend>"
+                "<p><label style='font-weight:normal'>"
+                "<input type='checkbox' name='echo_en' value='1' %s> "
+                "Enable echo detection</label></p>"
+                "<p style='color:#888;font-size:0.85em;margin:-4px 0 8px 24px'>"
+                "When a topic receives N publishes within M seconds, it's flagged as an echo loop. "
+                "Detected topics appear on /api/echo-detected.</p>"
+                "<label>Min publishes to trigger (1–255)</label>"
+                "<input type='number' name='echo_count' value='%u' min='1' max='255'>"
+                "<label>Window (seconds, 1–3600)</label>"
+                "<input type='number' name='echo_window' value='%u' min='1' max='3600'>",
+                echo_enabled ? "checked" : "",
+                echo_count, echo_window);
+        }
+
         /* The Save button triggers a reboot so changes apply uniformly
          * (MQTT port, auth credentials, retained-message toggle, NAPT, AP
          * config -- the previous "some take effect immediately, some need a
@@ -2207,6 +2248,33 @@ static void handle_http_client(int client_fd)
             ESP_LOGI(TAG, "Saved NAPT enabled: %d", napt_en);
         }
 #endif
+
+        /* Echo detection config */
+        {
+            uint8_t echo_en = (strstr(req.body, "echo_en=1") != NULL) ? 1 : 0;
+            nvs_settings_set_u8("echo_en", echo_en);
+            echo_load_config();
+            echo_save_config();
+            ESP_LOGI(TAG, "Saved echo detection enabled: %d", echo_en);
+        }
+        if (urldecode_param(req.body, "echo_count", val, sizeof(val))) {
+            int count = atoi(val);
+            if (count >= 1 && count <= 255) {
+                nvs_settings_set_u16("echo_count", (uint16_t)count);
+                echo_load_config();
+                echo_save_config();
+                ESP_LOGI(TAG, "Saved echo min_count: %d", count);
+            }
+        }
+        if (urldecode_param(req.body, "echo_window", val, sizeof(val))) {
+            int window = atoi(val);
+            if (window >= 1 && window <= 3600) {
+                nvs_settings_set_u16("echo_window", (uint16_t)window);
+                echo_load_config();
+                echo_save_config();
+                ESP_LOGI(TAG, "Saved echo window: %d s", window);
+            }
+        }
 
         /* NTP settings -- separate "ntp" NVS namespace per the plan. Done
          * inline here (rather than adding portal-wide helpers) because
@@ -3930,6 +3998,36 @@ static void handle_http_client(int client_fd)
             http_send_csrf_403(client_fd);
         } else {
             const char *r = "{\"ok\":true}";
+            http_response_start(client_fd, "200 OK", "application/json", strlen(r));
+            http_send_body(client_fd, r, strlen(r));
+        }
+
+    /* ============ Echo detection ============
+     * /api/echo-detected and /api/echo-reset. */
+    } else if (strcmp(req.path, "/api/echo-detected") == 0 && req.method == REQ_GET) {
+        echo_detected_list_t list;
+        echo_get_detected(&list);
+        int pos = 0;
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "{\"detected\":[");
+        for (int i = 0; i < list.count; i++) {
+            if (i > 0) pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, ",");
+            pos += snprintf(body + pos, PAGE_BUF_SIZE - pos,
+                "{\"topic\":\"%s\",\"count\":%u,\"detected_at\":%lld}",
+                list.entries[i].topic,
+                (unsigned)list.entries[i].count,
+                (long long)list.entries[i].detected_at);
+            if (pos > PAGE_BUF_SIZE - 128) break;
+        }
+        pos += snprintf(body + pos, PAGE_BUF_SIZE - pos, "],\"total\":%d}", list.count);
+        http_response_start(client_fd, "200 OK", "application/json", (size_t)pos);
+        http_send_body(client_fd, body, (size_t)pos);
+
+    } else if (strcmp(req.path, "/api/echo-reset") == 0 && req.method == REQ_POST) {
+        if (!csrf_verify(req.csrf_header, req.body)) {
+            http_send_csrf_403(client_fd);
+        } else {
+            echo_reset();
+            const char *r = "{\"reset\":true}";
             http_response_start(client_fd, "200 OK", "application/json", strlen(r));
             http_send_body(client_fd, r, strlen(r));
         }

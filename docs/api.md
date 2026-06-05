@@ -2,38 +2,38 @@
 
 ## HTTP endpoints
 
-| Path               | Method | Auth  | Description                                                                      |
-| ------------------ | ------ | ----- | -------------------------------------------------------------------------------- |
-| `/`                | GET    | gated | Dashboard with live stats                                                        |
-| `/clients`         | GET    | gated | Connected MQTT + WiFi AP clients (live, in-place refresh)                        |
-| `/timers`          | GET    | gated | List of 16 scheduled-publish slots + master pause                                |
-| `/timers/edit`     | GET    | gated | Per-slot edit form (query `?n=1..16`). `&saved=1` shows the saved banner         |
-| `/timers/save`     | POST   | gated | Persist a slot from the edit form; redirects to `/timers/edit?n=&saved=1`        |
-| `/timers/clear`    | POST   | gated | Wipe a slot to defaults                                                          |
-| `/timers/master`   | POST   | gated | Toggle master pause (`enable=0\|1`)                                              |
-| `/timers/fire`     | POST   | gated | Test-fire one slot immediately, irrespective of schedule                         |
-| `/settings`        | GET    | gated | Broker / AP / NTP settings form (includes the timezone preset dropdown)          |
-| `/config`          | GET    | gated | WiFi configuration form                                                          |
-| `/update`          | GET    | gated | Firmware update page (upload + URL + rollback)                                   |
-| `/time`            | GET    | gated | Live clock, NTP client+server status, force-resync                               |
-| `/rebooting`       | GET    | open  | Standalone reboot countdown page (read-only, no reboot)                          |
-| `/api/ping`        | GET    | open  | Liveness — `{uptime_s}`. Bypasses Basic Auth so countdown polling won't prompt.  |
-| `/api/status`      | GET    | gated | Broker stats, WiFi, firmware version, system info                                |
-| `/api/clients`     | GET    | gated | Connected MQTT + WiFi AP clients                                                 |
-| `/api/time`        | GET    | open  | `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running, ...}` |
-| `/api/time/resync` | POST   | gated | Force an immediate upstream NTP poll                                             |
-| `/api/timers`      | GET    | gated | All 16 slots + master state + `next_fire_unix` per slot                          |
+| Path               | Method | Auth  | Description                                                                                    |
+| ------------------ | ------ | ----- | ---------------------------------------------------------------------------------------------- |
+| `/`                | GET    | gated | Dashboard with live stats                                                                      |
+| `/clients`         | GET    | gated | Connected MQTT + WiFi AP clients (live, in-place refresh)                                      |
+| `/timers`          | GET    | gated | List of 16 scheduled-publish slots + master pause                                              |
+| `/timers/edit`     | GET    | gated | Per-slot edit form (query `?n=1..16`). `&saved=1` shows the saved banner                       |
+| `/timers/save`     | POST   | gated | Persist a slot from the edit form; redirects to `/timers/edit?n=&saved=1`                      |
+| `/timers/clear`    | POST   | gated | Wipe a slot to defaults                                                                        |
+| `/timers/master`   | POST   | gated | Toggle master pause (`enable=0\|1`)                                                            |
+| `/timers/fire`     | POST   | gated | Test-fire one slot immediately, irrespective of schedule                                       |
+| `/settings`        | GET    | gated | Broker / AP / NTP settings form (includes the timezone preset dropdown)                        |
+| `/config`          | GET    | gated | WiFi configuration form                                                                        |
+| `/update`          | GET    | gated | Firmware update page (upload + URL + rollback)                                                 |
+| `/time`            | GET    | gated | Live clock, NTP client+server status, force-resync                                             |
+| `/rebooting`       | GET    | open  | Standalone reboot countdown page (read-only, no reboot)                                        |
+| `/api/ping`        | GET    | open  | Liveness — `{uptime_s}`. Bypasses Basic Auth so countdown polling won't prompt.                |
+| `/api/status`      | GET    | gated | Broker stats, WiFi, firmware version, system info                                              |
+| `/api/clients`     | GET    | gated | Connected MQTT + WiFi AP clients                                                               |
+| `/api/time`        | GET    | open  | `{synced, epoch_us, last_sync_age_s, sync_count, upstream, server_running, ...}`               |
+| `/api/time/resync` | POST   | gated | Force an immediate upstream NTP poll                                                           |
+| `/api/timers`      | GET    | gated | All 16 slots + master state + `next_fire_unix` per slot                                        |
 | `/api/timers/<n>`  | PUT    | gated | Replace slot `<n>` (1..16) from JSON body. Validates; returns `next_fire_unix`. CSRF required. |
-| `/api/timers/<n>`  | DELETE | gated | Wipe slot `<n>`. CSRF required.                                                  |
-| `/ota-upload`      | POST   | gated | OTA firmware upload (multipart/form-data)                                        |
-| `/ota-url`         | POST   | gated | OTA firmware fetch from URL (`http://` or `https://`)                            |
-| `/ota-rollback`    | POST   | gated | Switch boot partition to the other OTA slot and reboot                           |
-| `/save-settings`   | POST   | gated | Save broker / AP / NTP settings to NVS                                           |
-| `/save`            | POST   | gated | Save WiFi credentials                                                            |
-| `/clear`           | GET    | gated | Clear saved WiFi credentials                                                     |
-| `/reconnect`       | GET    | gated | Reconnect to saved WiFi                                                          |
-| `/ap-toggle`       | GET    | gated | Toggle AP mode                                                                   |
-| `/reboot`          | GET    | gated | Reboot the device                                                                |
+| `/api/timers/<n>`  | DELETE | gated | Wipe slot `<n>`. CSRF required.                                                                |
+| `/ota-upload`      | POST   | gated | OTA firmware upload (multipart/form-data)                                                      |
+| `/ota-url`         | POST   | gated | OTA firmware fetch from URL (`http://` or `https://`)                                          |
+| `/ota-rollback`    | POST   | gated | Switch boot partition to the other OTA slot and reboot                                         |
+| `/save-settings`   | POST   | gated | Save broker / AP / NTP settings to NVS                                                         |
+| `/save`            | POST   | gated | Save WiFi credentials                                                                          |
+| `/clear`           | GET    | gated | Clear saved WiFi credentials                                                                   |
+| `/reconnect`       | GET    | gated | Reconnect to saved WiFi                                                                        |
+| `/ap-toggle`       | GET    | gated | Toggle AP mode                                                                                 |
+| `/reboot`          | GET    | gated | Reboot the device                                                                              |
 
 ## Network services
 
